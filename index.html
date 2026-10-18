@@ -159,7 +159,7 @@ textarea { resize: vertical; min-height: 70px; }
 // ════════════════════════════════════════════════════════════
 // CONFIG — paste your Apps Script /exec URL here
 // ════════════════════════════════════════════════════════════
-const API = "https://script.google.com/a/macros/psgcas.ac.in/s/AKfycbz-LLf0V0RzmnS31XV4Ykm8dqGHiCJvOpPmAPqa1DfNJzM9oqoiAKHXhVZPCFupn1A-/exec";
+const API = "https://script.google.com/macros/s/AKfycbxXGqC7LPbfqeFBRbahb0MFcwuxS0lsV0pIri89sMh4jkWQ8BL95VAg7BL_RRvsiI0W/exec";
 
 // ── state ────────────────────────────────────────────────────
 let DB = { vendors:[], modules:[], fields:[], trainers:[], engagements:[], demos:[], demoscores:[], decisions:[], feedback:[] };
@@ -176,7 +176,7 @@ const fmtToday = () => { const d=new Date(); return d.getFullYear()+"-"+String(d
 function showLoading(v){ $("loading").style.display = v ? "flex" : "none"; }
 function showToast(msg, dur=3000){ const t=$("toast"); t.textContent=msg; t.style.display="block"; setTimeout(()=>t.style.display="none", dur); }
 
-// ── API calls ─────────────────────────────────────────────────
+// ── API calls — ALL use GET to avoid CORS preflight ───────────
 async function apiGet(action) {
   const r = await fetch(API + "?action=" + action);
   const j = await r.json();
@@ -184,11 +184,15 @@ async function apiGet(action) {
   return j.data;
 }
 
+// Sends all fields as URL parameters (GET, no preflight).
+// Complex values (arrays/objects) are JSON-encoded.
 async function apiPost(payload) {
-  const r = await fetch(API, {
-    method: "POST",
-    body: JSON.stringify(payload)
+  const params = new URLSearchParams();
+  Object.keys(payload).forEach(k => {
+    const v = payload[k];
+    params.append(k, (typeof v === "object" && v !== null) ? JSON.stringify(v) : String(v === undefined || v === null ? "" : v));
   });
+  const r = await fetch(API + "?" + params.toString());
   const j = await r.json();
   if (!j.ok) throw new Error(j.error);
   return j.data;
