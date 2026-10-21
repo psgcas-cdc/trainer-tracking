@@ -182,7 +182,7 @@ async function loadSheets(names) {
 }
 
 async function loadAll() {
-  // Used after writes — invalidate and reload what's needed for current page
+  // Used after writes - invalidate and reload what's needed for current page
   if (DB._loaded) DB._loaded.clear();
   await loadPageSheets(currentPage, currentParams);
 }
@@ -538,13 +538,13 @@ function demoDetail(m, params={}) {
     </div>`;
   } else if(evals.length&&!modFields.length){
     scoresHtml=`<div class="card"><div class="card-head"><h2>Evaluations (${evals.length})</h2></div>
-      ${evals.map(ev=>`<div style="margin-bottom:12px;font-size:13px"><b>${esc(evaluatorName(ev.EvaluatorID))}</b> — ${esc(ev.Remarks)||"No remarks"}</div>`).join("")}
+      ${evals.map(ev=>`<div style="margin-bottom:12px;font-size:13px"><b>${esc(evaluatorName(ev.EvaluatorID))}</b> - ${esc(ev.Remarks)||"No remarks"}</div>`).join("")}
     </div>`;
   }
 
-  // evaluate form (if SCHEDULED or EVALUATED — can always add more)
+  // evaluate form (if SCHEDULED or EVALUATED - can always add more)
   let evaluateHtml="";
-  if(demo.Status==="SCHEDULED"||demo.Status==="EVALUATED"){
+  if(demo.Status==="SCHEDULED"){
     const evalOptions=activeEvaluators().map(e=>`<option value="${e.EvaluatorID}">${esc(e.Name)}</option>`).join("");
     evaluateHtml=`<div class="card" id="sec-evaluate">
       <div class="card-head"><h2>Submit Evaluation</h2></div>
@@ -634,7 +634,7 @@ function demoDetail(m, params={}) {
   m.innerHTML=`
     <div class="page-head">
       <div>
-        <h1>${esc(trainerName(demo.TrainerID))} — ${esc(moduleName(demo.ModuleID))}</h1>
+        <h1>${esc(trainerName(demo.TrainerID))} - ${esc(moduleName(demo.ModuleID))}</h1>
         <div class="sub">${fmt(demo.DemoDate)}${demo.Topic?" · "+esc(demo.Topic):""} · <span class="badge ${demoBadge(demo)}">${demoStatusLabel(demo)}</span></div>
       </div>
       <a class="btn ghost sm" href="#" onclick="nav('trainer-detail',{id:'${demo.TrainerID}'});return false;">← Trainer</a>
