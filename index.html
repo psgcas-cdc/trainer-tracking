@@ -146,7 +146,7 @@ const PAGE_SHEETS = {
 const $  = id => document.getElementById(id);
 const el = (tag,cls="",html="") => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
 const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-const fmt = d => d ? String(d).slice(0,10).split("-").reverse().join(" ") : "-";
+const fmt = d => d ? String(d).slice(0,10).split("-").reverse().join("-") : "-";
 const fmtToday = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const isTrue = v => v===true||v==="TRUE"||v==="true";
 
