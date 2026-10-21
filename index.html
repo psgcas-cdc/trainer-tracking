@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TrainerTracker — PSG CAS</title>
+<title>TrainerTracker - PSG CAS</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -65,7 +65,11 @@ textarea{resize:vertical;min-height:70px}
 .score-table .max-lbl{color:var(--muted);font-size:12px}
 .score-total{font-weight:600;margin-top:10px;font-size:13px}
 .empty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
-#loading{position:fixed;inset:0;background:rgba(255,255,255,.75);display:flex;align-items:center;justify-content:center;z-index:9999;font-size:15px;color:var(--accent)}
+#loading{position:fixed;inset:0;background:rgba(255,255,255,.80);display:flex;align-items:center;justify-content:center;z-index:9999}
+.spin-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
+.spinner{width:40px;height:40px;border:3px solid #dde1e7;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin-text{font-size:13px;font-weight:500;color:var(--accent);letter-spacing:.03em}
 #toast{position:fixed;bottom:24px;right:24px;background:#1e293b;color:#fff;padding:10px 18px;border-radius:var(--radius);font-size:13px;z-index:9998;display:none}
 #modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:200;display:flex;align-items:center;justify-content:center}
 #modal-box{background:var(--surface);border-radius:var(--radius);padding:24px;width:90%;max-width:580px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.18)}
@@ -78,6 +82,11 @@ textarea{resize:vertical;min-height:70px}
 .avg-row td{font-weight:600;background:#f9fafb}
 .info-row{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px}
 .info-row .info-item{font-size:13px}.info-row .info-item span{font-weight:600}
+
+.shimmer{background:linear-gradient(90deg,#f0f0f0 25%,#e0e0e0 50%,#f0f0f0 75%);background-size:200% 100%;animation:shimmer 1.2s infinite;border-radius:4px;height:14px;margin:6px 0}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.page-enter{animation:fadeSlide .18s ease}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 </style>
 </head>
 <body>
@@ -91,6 +100,7 @@ textarea{resize:vertical;min-height:70px}
     <div class="section-label">Demos</div>
     <li><a href="#" data-page="schedule-demo">Schedule Demo</a></li>
     <li><a href="#" data-page="scheduled">Scheduled Demos</a></li>
+    <li><a href="#" data-page="evaluated">Evaluated Demos</a></li>
     <li><a href="#" data-page="followups">Follow-ups (Redo)</a></li>
     <div class="section-label">Records</div>
     <li><a href="#" data-page="add-feedback">Add Feedback</a></li>
@@ -102,7 +112,7 @@ textarea{resize:vertical;min-height:70px}
   </ul>
 </nav>
 <main id="main"></main>
-<div id="loading">Loading…</div>
+<div id="loading"><div class="spin-wrap"><div class="spinner"></div><div class="spin-text">Loading…</div></div></div>
 <div id="toast"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box"></div></div>
 
@@ -114,6 +124,23 @@ const API = "https://script.google.com/macros/s/AKfycbz-LLf0V0RzmnS31XV4Ykm8dqGH
 
 // ── state ─────────────────────────────────────────────────────
 let DB = { vendors:[], modules:[], fields:[], evaluators:[], trainers:[], engagements:[], demos:[], evaluations:[], evaluationscores:[], decisions:[], feedback:[] };
+
+const PAGE_SHEETS = {
+  dashboard:       ["trainers","engagements","demos","evaluations","decisions"],
+  trainers:        ["trainers","engagements","vendors","decisions","modules"],
+  active:          ["trainers","engagements","vendors","decisions","modules"],
+  scheduled:       ["demos","trainers","modules","evaluations"],
+  evaluated:       ["demos","trainers","modules","evaluations","evaluationscores","fields"],
+  followups:       ["demos","trainers","modules"],
+  "schedule-demo": ["trainers","modules"],
+  "demo-detail":   ["demos","trainers","modules","evaluators","evaluations","evaluationscores","fields"],
+  "add-feedback":  ["trainers"],
+  "trainer-detail":["trainers","engagements","vendors","demos","evaluations","decisions","modules","feedback"],
+  modules:         ["modules"],
+  vendors:         ["vendors"],
+  fields:          ["fields","modules"],
+  evaluators:      ["evaluators"]
+};
 
 // ── utils ─────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
@@ -145,32 +172,47 @@ async function apiCall(payload) {
   return j.data;
 }
 
+async function loadSheets(names) {
+  const toFetch = names.filter(n => !DB._loaded || !DB._loaded.has(n));
+  if (!toFetch.length) return;
+  const results = await Promise.all(toFetch.map(n => apiGet(n)));
+  toFetch.forEach((n, i) => { DB[n] = results[i]; });
+  if (!DB._loaded) DB._loaded = new Set();
+  toFetch.forEach(n => DB._loaded.add(n));
+}
+
 async function loadAll() {
+  // Used after writes — invalidate and reload what's needed for current page
+  if (DB._loaded) DB._loaded.clear();
+  await loadPageSheets(currentPage, currentParams);
+}
+
+let currentPage = "dashboard", currentParams = {};
+
+async function loadPageSheets(page, params) {
+  const needed = PAGE_SHEETS[page] || Object.keys(DB).filter(k => k !== "_loaded");
   showLoading(true);
-  try {
-    const [vendors,modules,fields,evaluators,trainers,engagements,demos,evaluations,evaluationscores,decisions,feedback] = await Promise.all([
-      apiGet("vendors"),apiGet("modules"),apiGet("fields"),apiGet("evaluators"),apiGet("trainers"),
-      apiGet("engagements"),apiGet("demos"),apiGet("evaluations"),apiGet("evaluationscores"),apiGet("decisions"),apiGet("feedback")
-    ]);
-    DB = {vendors,modules,fields,evaluators,trainers,engagements,demos,evaluations,evaluationscores,decisions,feedback};
-  } catch(e){ alert("Could not load data: "+e.message); }
+  try { await loadSheets(needed); } catch(e) { alert("Could not load data: " + e.message); }
   showLoading(false);
 }
 
+
 // ── router ────────────────────────────────────────────────────
 function nav(page, params={}) {
+  currentPage = page; currentParams = params;
   document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.page===page));
-  const m = $("main"); m.innerHTML="";
-  const pages = {
-    dashboard, trainers, active, scheduled, followups,
-    "schedule-demo": scheduleDemoPage,
-    "demo-detail": demoDetail,
-    "add-feedback": addFeedbackPage,
-    "trainer-detail": trainerDetail,
-    modules, vendors, fields, evaluators
-  };
-  if(pages[page]) pages[page](m, params);
-  else m.innerHTML="<p>Page not found.</p>";
+  const m = $("main"); m.innerHTML=""; m.className="page-enter";
+  // show shimmer while loading
+  m.innerHTML = `<div style="padding:20px"><div class="shimmer" style="width:40%;height:22px;margin-bottom:18px"></div>${[...Array(4)].map(()=>'<div class="shimmer"></div>').join("")}</div>`;
+  loadPageSheets(page, params).then(() => {
+    m.innerHTML = ""; m.className = "page-enter";
+    const pages = { dashboard, trainers, active, scheduled, evaluated, followups,
+      "schedule-demo": scheduleDemoPage, "demo-detail": demoDetail,
+      "add-feedback": addFeedbackPage, "trainer-detail": trainerDetail,
+      modules, vendors, fields, evaluators };
+    if (pages[page]) pages[page](m, params);
+    else m.innerHTML = "<p>Page not found.</p>";
+  });
 }
 document.querySelectorAll("#nav a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); nav(a.dataset.page); }));
 
@@ -356,7 +398,7 @@ function dashboard(m) {
         <tr><th>Trainer</th><th>Module</th><th>Topic</th><th></th></tr>
         ${scheduledToday.map(d=>`<tr>
           <td>${esc(trainerName(d.TrainerID))}</td><td>${esc(moduleName(d.ModuleID))}</td><td>${esc(d.Topic)}</td>
-          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">Evaluate →</a></td>
+          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">Evaluate</a></td>
         </tr>`).join("")}
       </table></div></div>`:""}
   `;
@@ -382,7 +424,10 @@ function scheduled(m) {
           <td>${esc(moduleName(d.ModuleID))}</td><td>${esc(d.Topic)}</td>
           <td><span class="badge ${d.Status==="SCHEDULED"?"blue":"purple"}">${d.Status==="SCHEDULED"?"Scheduled":"Awaiting decision"}</span></td>
           <td>${evalCount}</td>
-          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">${d.Status==="SCHEDULED"?"Evaluate →":"Decide →"}</a></td>
+          <td class="actions">
+            <a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">${d.Status==="SCHEDULED"?"Evaluate":"Decide →"}</a>
+            ${d.Status==="SCHEDULED"?`<a href="#" onclick="showEditDemo('${d.DemoID}');return false;">Edit</a>`:""}
+          </td>
         </tr>`;
       }).join("")||`<tr><td colspan="7" class="empty">No scheduled demos.</td></tr>`}
     </table></div></div>
@@ -646,6 +691,80 @@ window.submitDecide = async function(did, trainerID) {
   showLoading(false);
 };
 
+// ── Evaluated Demos ────────────────────────────────────────────
+function evaluated(m, params={}) {
+  const moduleFilter  = params.module  || "";
+  const trainerFilter = params.trainer || "";
+  const statusFilter  = params.status  || "";
+  const dateFrom      = params.from    || "";
+  const dateTo        = params.to      || "";
+
+  function demoAvgScore(did) {
+    const evals = DB.evaluations.filter(ev => String(ev.DemoID) === String(did));
+    if (!evals.length) return null;
+    const allScores = DB.evaluationscores.filter(sc => evals.some(ev => String(ev.EvalID) === String(sc.EvalID)));
+    if (!allScores.length) return null;
+    const evalTotals = evals.map(ev => {
+      const s = DB.evaluationscores.filter(sc => String(sc.EvalID) === String(ev.EvalID));
+      return s.reduce((a, sc) => a + Number(sc.Score), 0);
+    });
+    return Math.round(evalTotals.reduce((a, b) => a + b, 0) / evalTotals.length * 10) / 10;
+  }
+
+  let list = DB.demos.filter(d =>
+    d.Status === "EVALUATED" || d.Status === "DECIDED"
+  );
+
+  if (moduleFilter)  list = list.filter(d => String(d.ModuleID)  === moduleFilter);
+  if (trainerFilter) list = list.filter(d => String(d.TrainerID) === trainerFilter);
+  if (statusFilter)  list = list.filter(d => d.Status === statusFilter || (statusFilter === "DECIDED" && d.Status === "DECIDED" && !d.Outcome) || (statusFilter !== "" && (d.Status === statusFilter || d.Outcome === statusFilter)));
+  if (dateFrom)      list = list.filter(d => String(d.DemoDate).slice(0,10) >= dateFrom);
+  if (dateTo)        list = list.filter(d => String(d.DemoDate).slice(0,10) <= dateTo);
+
+  list.sort((a, b) => new Date(b.DemoDate) - new Date(a.DemoDate) || Number(b.DemoID) - Number(a.DemoID));
+
+  m.innerHTML = `
+    <div class="page-head"><div><h1>Evaluated Demos</h1><div class="sub">${list.length} result${list.length !== 1 ? "s" : ""}</div></div></div>
+    <div class="filters">
+      <label>Module<select id="ev-f-module">
+        <option value="">All</option>
+        ${activeModules().map(mod => `<option value="${mod.ModuleID}" ${moduleFilter === String(mod.ModuleID) ? "selected" : ""}>${esc(mod.Name)}</option>`).join("")}
+      </select></label>
+      <label>Trainer<select id="ev-f-trainer">
+        <option value="">All</option>
+        ${DB.trainers.filter(t => isTrue(t.Active)).map(t => `<option value="${t.TrainerID}" ${trainerFilter === String(t.TrainerID) ? "selected" : ""}>${esc(t.Name)}</option>`).join("")}
+      </select></label>
+      <label>Status<select id="ev-f-status">
+        <option value="">All</option>
+        <option value="EVALUATED" ${statusFilter === "EVALUATED" ? "selected" : ""}>Awaiting decision</option>
+        <option value="DECIDED" ${statusFilter === "DECIDED" ? "selected" : ""}>Decided</option>
+      </select></label>
+      <label>From<input type="date" id="ev-f-from" value="${dateFrom}"></label>
+      <label>To<input type="date" id="ev-f-to" value="${dateTo}"></label>
+      <button class="btn" onclick="nav('evaluated',{module:$('ev-f-module').value,trainer:$('ev-f-trainer').value,status:$('ev-f-status').value,from:$('ev-f-from').value,to:$('ev-f-to').value})">Filter</button>
+      <a class="btn ghost" href="#" onclick="nav('evaluated');return false;">Clear</a>
+    </div>
+    <div class="card"><div class="tbl-wrap"><table>
+      <tr><th>Date</th><th>Trainer</th><th>Module</th><th>Topic</th><th>Status</th><th>Evaluators</th><th>Avg Score</th><th></th></tr>
+      ${list.map(d => {
+        const evalCount = DB.evaluations.filter(ev => String(ev.DemoID) === String(d.DemoID)).length;
+        const avg = demoAvgScore(d.DemoID);
+        return `<tr>
+          <td>${fmt(d.DemoDate)}</td>
+          <td><a href="#" onclick="nav('trainer-detail',{id:'${d.TrainerID}'});return false;">${esc(trainerName(d.TrainerID))}</a></td>
+          <td>${esc(moduleName(d.ModuleID))}</td>
+          <td>${esc(d.Topic)}</td>
+          <td><span class="badge ${demoBadge(d)}">${esc(demoStatusLabel(d))}</span></td>
+          <td>${evalCount}</td>
+          <td>${avg !== null ? avg : '<span class="muted">-</span>'}</td>
+          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">View →</a></td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="8" class="empty">No evaluated demos found.</td></tr>`}
+    </table></div></div>
+  `;
+}
+
+
 // ── Follow-ups ─────────────────────────────────────────────────
 function followups(m) {
   const waiting=pendingRedos(), completed=completedRedos();
@@ -803,7 +922,7 @@ function trainerDetail(m, params={}) {
   const cells=levelCells(dec,mods);
   const eng=currentEngagement(tid);
   const engHistory=DB.engagements.filter(e=>String(e.TrainerID)===tid).sort((a,b)=>new Date(b.StartDate)-new Date(a.StartDate));
-  const trainerDemos=DB.demos.filter(d=>String(d.TrainerID)===tid).sort((a,b)=>new Date(b.DemoDate)-new Date(a.DemoDate)||Number(b.DemoID)-Number(a.DemoID));
+  const trainerDemos=DB.demos.filter(d=>String(d.TrainerID)===tid&&d.Status!=="CANCELLED").sort((a,b)=>new Date(b.DemoDate)-new Date(a.DemoDate)||Number(b.DemoID)-Number(a.DemoID));
   const trainerFeedback=DB.feedback.filter(f=>String(f.TrainerID)===tid).sort((a,b)=>new Date(b.TrainingDate)-new Date(a.TrainingDate));
 
   const moduleRows=mods.map(mod=>{
@@ -862,7 +981,10 @@ function trainerDetail(m, params={}) {
             <td>${fmt(d.DemoDate)}</td><td>${esc(moduleName(d.ModuleID))}</td><td>${esc(d.Topic)}</td>
             <td><span class="badge ${demoBadge(d)}">${esc(demoStatusLabel(d))}</span></td>
             <td>${evalCount}</td>
-            <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">View</a></td>
+            <td class="actions">
+              <a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">View</a>
+              ${d.Status==="SCHEDULED"?`<a href="#" onclick="showEditDemo('${d.DemoID}');return false;">Edit</a>`:""}
+            </td>
           </tr>`;
         }).join("")||`<tr><td colspan="6" class="empty">No demos yet.</td></tr>`}
       </table></div>
@@ -880,6 +1002,48 @@ function trainerDetail(m, params={}) {
     </div>
   `;
 }
+
+window.showEditDemo = function(did) {
+  const d = DB.demos.find(x => String(x.DemoID) === String(did));
+  if (!d) return;
+  openModal(`<h2>Edit Scheduled Demo</h2>
+    <div class="form-grid">
+      <div class="field">
+        <label class="lbl">Module *</label>
+        <select id="ed-module">
+          ${activeModules().map(m => `<option value="${m.ModuleID}" ${String(m.ModuleID)===String(d.ModuleID)?"selected":""}>${esc(m.Name)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field"><label class="lbl">Demo Date *</label><input type="date" id="ed-date" value="${d.DemoDate}"></div>
+      <div class="field full"><label class="lbl">Topic</label><input type="text" id="ed-topic" value="${esc(d.Topic||"")}"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="submitEditDemo('${did}','${d.TrainerID}')">Save</button>
+      <button class="btn danger" onclick="submitEditDemo('${did}','${d.TrainerID}','CANCELLED')">Cancel Demo</button>
+      <button class="btn ghost" onclick="closeModal()">Back</button>
+    </div>
+    <div class="error-msg hidden" id="ed-err"></div>`);
+};
+
+window.submitEditDemo = async function(did, trainerID, cancel) {
+  const errEl = $("ed-err");
+  try {
+    showLoading(true);
+    await apiCall({
+      action: "editDemo",
+      DemoID: did,
+      ModuleID: $("ed-module").value,
+      DemoDate: $("ed-date").value,
+      Topic: $("ed-topic").value.trim(),
+      Status: cancel || ""
+    });
+    await loadAll();
+    closeModal();
+    showToast(cancel ? "Demo cancelled." : "Demo updated.");
+    nav("scheduled");
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove("hidden"); }
+  showLoading(false);
+};
 
 // ── Add Feedback ───────────────────────────────────────────────
 function addFeedbackPage(m, params={}) {
@@ -1164,7 +1328,6 @@ window.submitEditEvaluator = async function(eid) {
 
 // ── boot ───────────────────────────────────────────────────────
 (async function boot() {
-  await loadAll();
   nav("dashboard");
 })();
 </script>
