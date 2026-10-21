@@ -132,7 +132,7 @@ const PAGE_SHEETS = {
   scheduled:       ["demos","trainers","modules","evaluations"],
   evaluated:       ["demos","trainers","modules","evaluations","evaluationscores","fields"],
   followups:       ["demos","trainers","modules"],
-  "schedule-demo": ["trainers","modules"],
+  "schedule-demo": ["trainers","modules","vendors","engagements"],
   "demo-detail":   ["demos","trainers","modules","evaluators","evaluations","evaluationscores","fields"],
   "add-feedback":  ["trainers"],
   "trainer-detail":["trainers","engagements","vendors","demos","evaluations","decisions","modules","feedback"],
@@ -175,15 +175,29 @@ async function apiCall(payload) {
 async function loadSheets(names) {
   const toFetch = names.filter(n => !DB._loaded || !DB._loaded.has(n));
   if (!toFetch.length) return;
-  const results = await Promise.all(toFetch.map(n => apiGet(n)));
-  toFetch.forEach((n, i) => { DB[n] = results[i]; });
-  if (!DB._loaded) DB._loaded = new Set();
-  toFetch.forEach(n => DB._loaded.add(n));
+  // if everything is needed and nothing loaded yet, use bulk fetch
+  const allKeys = Object.keys(DB).filter(k => k !== "_loaded");
+  const needsAll = allKeys.every(k => toFetch.includes(k));
+  if (needsAll) {
+    const data = await apiGet("all");
+    Object.keys(data).forEach(k => { DB[k] = data[k]; });
+    if (!DB._loaded) DB._loaded = new Set();
+    allKeys.forEach(k => DB._loaded.add(k));
+  } else {
+    const results = await Promise.all(toFetch.map(n => apiGet(n)));
+    toFetch.forEach((n, i) => { DB[n] = results[i]; });
+    if (!DB._loaded) DB._loaded = new Set();
+    toFetch.forEach(n => DB._loaded.add(n));
+  }
 }
 
-async function loadAll() {
-  // Used after writes - invalidate and reload what's needed for current page
-  if (DB._loaded) DB._loaded.clear();
+async function loadAll(sheetsToRefresh) {
+  // if specific sheets given, only invalidate those
+  if (sheetsToRefresh && sheetsToRefresh.length) {
+    sheetsToRefresh.forEach(k => DB._loaded && DB._loaded.delete(k));
+  } else {
+    if (DB._loaded) DB._loaded.clear();
+  }
   await loadPageSheets(currentPage, currentParams);
 }
 
@@ -436,27 +450,40 @@ function scheduled(m) {
 
 // ── Schedule Demo page ────────────────────────────────────────
 function scheduleDemoPage(m, params={}) {
-  const preTrainer=params.trainerID||"";
-  m.innerHTML=`
+  const preTrainer = params.trainerID || "";
+
+  m.innerHTML = `
     <div class="page-head"><div><h1>Schedule Demo</h1></div></div>
     <div class="card">
       <div class="form-grid">
         <div class="field">
+          <label class="lbl">Vendor *</label>
+          <select id="sd-vendor" onchange="sdFilterTrainers()">
+            <option value="">-- select vendor --</option>
+            ${activeVendors().map(v => `<option value="${v.VendorID}">${esc(v.Name)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
           <label class="lbl">Trainer *</label>
-          <select id="sd-trainer">
-            <option value="">-- select --</option>
-            ${activeTrainers().map(t=>`<option value="${t.TrainerID}" ${String(t.TrainerID)===preTrainer?"selected":""}>${esc(t.Name)}</option>`).join("")}
+          <select id="sd-trainer" disabled>
+            <option value="">-- select vendor first --</option>
           </select>
         </div>
         <div class="field">
           <label class="lbl">Module *</label>
           <select id="sd-module">
             <option value="">-- select --</option>
-            ${activeModules().map(mod=>`<option value="${mod.ModuleID}">${esc(mod.Name)}</option>`).join("")}
+            ${activeModules().map(mod => `<option value="${mod.ModuleID}">${esc(mod.Name)}</option>`).join("")}
           </select>
         </div>
-        <div class="field"><label class="lbl">Topic</label><input type="text" id="sd-topic" placeholder="e.g. Percentages, Time and Work"></div>
-        <div class="field"><label class="lbl">Demo Date *</label><input type="date" id="sd-date" value="${fmtToday()}"></div>
+        <div class="field">
+          <label class="lbl">Demo Date *</label>
+          <input type="date" id="sd-date" value="${fmtToday()}">
+        </div>
+        <div class="field full">
+          <label class="lbl">Topic</label>
+          <input type="text" id="sd-topic" placeholder="e.g. Percentages, Time and Work">
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn" onclick="submitScheduleDemo()">Schedule</button>
@@ -465,7 +492,40 @@ function scheduleDemoPage(m, params={}) {
       <div class="error-msg hidden" id="sd-err"></div>
     </div>
   `;
+
+  // If arriving with a pre-selected trainer, auto-select their vendor
+  if (preTrainer) {
+    const eng = currentEngagement(preTrainer);
+    if (eng) {
+      $("sd-vendor").value = String(eng.VendorID);
+      sdFilterTrainers();
+      $("sd-trainer").value = String(preTrainer);
+    }
+  }
 }
+
+window.sdFilterTrainers = function() {
+  const vendorID = $("sd-vendor").value;
+  const sel = $("sd-trainer");
+  if (!vendorID) {
+    sel.innerHTML = `<option value="">-- select vendor first --</option>`;
+    sel.disabled = true;
+    return;
+  }
+  // find trainers currently engaged with this vendor
+  const matched = activeTrainers().filter(t => {
+    const eng = currentEngagement(t.TrainerID);
+    return eng && String(eng.VendorID) === vendorID;
+  });
+  if (!matched.length) {
+    sel.innerHTML = `<option value="">No trainers for this vendor</option>`;
+    sel.disabled = true;
+    return;
+  }
+  sel.innerHTML = `<option value="">-- select trainer --</option>` +
+    matched.map(t => `<option value="${t.TrainerID}">${esc(t.Name)}</option>`).join("");
+  sel.disabled = false;
+};
 
 window.submitScheduleDemo = async function() {
   const trainer=$("sd-trainer").value, module=$("sd-module").value, errEl=$("sd-err");
@@ -473,7 +533,7 @@ window.submitScheduleDemo = async function() {
   try {
     showLoading(true);
     await apiCall({action:"scheduleDemo", TrainerID:trainer, ModuleID:module, Topic:$("sd-topic").value.trim(), DemoDate:$("sd-date").value});
-    await loadAll(); showToast("Demo scheduled."); nav("scheduled");
+    await loadAll(["demos"]); showToast("Demo scheduled."); nav("scheduled");
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -673,7 +733,7 @@ window.submitEvaluation = async function(did) {
   try {
     showLoading(true);
     await apiCall({action:"submitEvaluation", DemoID:did, EvaluatorID:evaluatorID, Remarks:$("ev-remarks").value.trim(), Scores:scores});
-    await loadAll(); showToast("Evaluation submitted."); nav("demo-detail",{id:did});
+    await loadAll(["demos","evaluations","evaluationscores"]); showToast("Evaluation submitted."); nav("demo-detail",{id:did});
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -685,7 +745,7 @@ window.submitDecide = async function(did, trainerID) {
   try {
     showLoading(true);
     await apiCall({action:"decideDemo", DemoID:did, Outcome:outcome, Level:outcome==="SELECTED"?$("dec-level").value:"ALL", RejectScope:outcome==="PERM_REJECT"?$("dec-scope").value:"", DecidedBy:$("dec-by").value, FinalRemarks:$("dec-remarks").value.trim()});
-    await loadAll(); showToast("Outcome recorded.");
+    await loadAll(["demos","decisions"]); showToast("Outcome recorded.");
     nav("trainer-detail",{id:trainerID});
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
@@ -1037,7 +1097,7 @@ window.submitEditDemo = async function(did, trainerID, cancel) {
       Topic: $("ed-topic").value.trim(),
       Status: cancel || ""
     });
-    await loadAll();
+    await loadAll(["demos"]);
     closeModal();
     showToast(cancel ? "Demo cancelled." : "Demo updated.");
     nav("scheduled");
@@ -1076,7 +1136,7 @@ window.submitFeedback = async function() {
   try {
     showLoading(true);
     await apiCall({action:"addFeedback", TrainerID:trainer, TrainingDate:$("fb-date").value, Session:$("fb-session").value, BatchDept:$("fb-batch").value, Feedback:text, Rating:$("fb-rating").value});
-    await loadAll(); showToast("Feedback saved."); nav("trainer-detail",{id:trainer});
+    await loadAll(["feedback"]); showToast("Feedback saved."); nav("trainer-detail",{id:trainer});
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1161,7 +1221,7 @@ window.submitAddTrainer = async function() {
   try {
     showLoading(true);
     const res=await apiCall({action:"addTrainer", Name:name, Phone:$("at-phone").value.trim(), Email:$("at-email").value.trim(), VendorID:vendor, Type:$("at-type").value, Notes:$("at-notes").value.trim(), StartDate:fmtToday()});
-    await loadAll(); closeModal(); showToast("Trainer added."); nav("trainer-detail",{id:res.TrainerID});
+    await loadAll(["trainers","engagements"]); closeModal(); showToast("Trainer added."); nav("trainer-detail",{id:res.TrainerID});
   } catch(e){ $("at-err").textContent=e.message; $("at-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1184,7 +1244,7 @@ window.submitEditTrainer = async function(tid) {
   try {
     showLoading(true);
     await apiCall({action:"editTrainer", TrainerID:tid, Name:name, Phone:$("et-phone").value.trim(), Email:$("et-email").value.trim(), Notes:$("et-notes").value.trim()});
-    await loadAll(); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
+    await loadAll(["trainers"]);; closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
   } catch(e){ $("et-err").textContent=e.message; $("et-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1208,7 +1268,7 @@ window.submitChangeEngagement = async function(tid) {
   try {
     showLoading(true);
     await apiCall({action:"addEngagement", TrainerID:tid, VendorID:vendor, Type:$("ce-type").value, StartDate:$("ce-date").value});
-    await loadAll(); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
+    await loadAll(["engagements"]); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
   } catch(e){ $("ce-err").textContent=e.message; $("ce-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1225,7 +1285,7 @@ window.showAddModule = function() {
 window.submitAddModule = async function() {
   const name=$("am-name").value.trim();
   if(!name){ $("am-err").textContent="Name is required."; $("am-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addModule", Name:name, Description:$("am-desc").value.trim()}); await loadAll(); closeModal(); showToast("Module added."); nav("modules"); }
+  try { showLoading(true); await apiCall({action:"addModule", Name:name, Description:$("am-desc").value.trim()}); await loadAll(["modules"]); closeModal(); showToast("Module added."); nav("modules"); }
   catch(e){ $("am-err").textContent=e.message; $("am-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1244,7 +1304,7 @@ window.showAddVendor = function() {
 window.submitAddVendor = async function() {
   const name=$("av-name").value.trim();
   if(!name){ $("av-err").textContent="Name is required."; $("av-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addVendor", Name:name, ContactPerson:$("av-contact").value.trim(), Phone:$("av-phone").value.trim(), Email:$("av-email").value.trim()}); await loadAll(); closeModal(); showToast("Vendor added."); nav("vendors"); }
+  try { showLoading(true); await apiCall({action:"addVendor", Name:name, ContactPerson:$("av-contact").value.trim(), Phone:$("av-phone").value.trim(), Email:$("av-email").value.trim()}); await loadAll(["vendors"]); closeModal(); showToast("Vendor added."); nav("vendors"); }
   catch(e){ $("av-err").textContent=e.message; $("av-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1266,7 +1326,7 @@ window.showAddField = function() {
 window.submitAddField = async function() {
   const module=$("af-module").value, crit=$("af-crit").value.trim();
   if(!module||!crit){ $("af-err").textContent="Module and Criterion are required."; $("af-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addField", ModuleID:module, Criterion:crit, MinMarks:Number($("af-min").value)||0, MaxMarks:Number($("af-max").value)||10, DisplayOrder:Number($("af-order").value)||1}); await loadAll(); closeModal(); showToast("Field added."); nav("fields"); }
+  try { showLoading(true); await apiCall({action:"addField", ModuleID:module, Criterion:crit, MinMarks:Number($("af-min").value)||0, MaxMarks:Number($("af-max").value)||10, DisplayOrder:Number($("af-order").value)||1}); await loadAll(["fields"]); closeModal(); showToast("Field added."); nav("fields"); }
   catch(e){ $("af-err").textContent=e.message; $("af-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1287,7 +1347,7 @@ window.showEditField = function(fid) {
 window.submitEditField = async function(fid) {
   const crit=$("ef-crit").value.trim();
   if(!crit){ $("ef-err").textContent="Criterion is required."; $("ef-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"updateField", FieldID:fid, Criterion:crit, MinMarks:Number($("ef-min").value), MaxMarks:Number($("ef-max").value), DisplayOrder:Number($("ef-order").value), Active:$("ef-active").value==="true"}); await loadAll(); closeModal(); showToast("Field updated."); nav("fields"); }
+  try { showLoading(true); await apiCall({action:"updateField", FieldID:fid, Criterion:crit, MinMarks:Number($("ef-min").value), MaxMarks:Number($("ef-max").value), DisplayOrder:Number($("ef-order").value), Active:$("ef-active").value==="true"}); await loadAll(["fields"]); closeModal(); showToast("Field updated."); nav("fields"); }
   catch(e){ $("ef-err").textContent=e.message; $("ef-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1303,7 +1363,7 @@ window.showAddEvaluator = function() {
 window.submitAddEvaluator = async function() {
   const name=$("ae-name").value.trim();
   if(!name){ $("ae-err").textContent="Name is required."; $("ae-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addEvaluator", Name:name}); await loadAll(); closeModal(); showToast("Evaluator added."); nav("evaluators"); }
+  try { showLoading(true); await apiCall({action:"addEvaluator", Name:name}); await loadAll(["evaluators"]); closeModal(); showToast("Evaluator added."); nav("evaluators"); }
   catch(e){ $("ae-err").textContent=e.message; $("ae-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1321,7 +1381,7 @@ window.showEditEvaluator = function(eid) {
 window.submitEditEvaluator = async function(eid) {
   const name=$("ee-name").value.trim();
   if(!name){ $("ee-err").textContent="Name is required."; $("ee-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"updateEvaluator", EvaluatorID:eid, Name:name, Active:$("ee-active").value==="true"}); await loadAll(); closeModal(); showToast("Updated."); nav("evaluators"); }
+  try { showLoading(true); await apiCall({action:"updateEvaluator", EvaluatorID:eid, Name:name, Active:$("ee-active").value==="true"}); await loadAll(["evaluators"]); closeModal(); showToast("Updated."); nav("evaluators"); }
   catch(e){ $("ee-err").textContent=e.message; $("ee-err").classList.remove("hidden"); }
   showLoading(false);
 };
