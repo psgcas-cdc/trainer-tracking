@@ -155,10 +155,17 @@ function showToast(msg,dur=3000){ const t=$("toast"); t.textContent=msg; t.style
 
 // ── API ───────────────────────────────────────────────────────
 async function apiGet(action) {
-  const r = await fetch(API+"?action="+action);
-  const j = await r.json();
-  if(!j.ok) throw new Error(j.error);
-  return j.data;
+  const url = API + "?action=" + action + "&_=" + Date.now();
+  const r = await fetch(url, {redirect: "follow"});
+  const text = await r.text();
+  try {
+    const j = JSON.parse(text);
+    if(!j.ok) throw new Error(j.error);
+    return j.data;
+  } catch(e) {
+    console.error("Bad response for action="+action+":", text.slice(0,200));
+    throw new Error("Server returned non-JSON response");
+  }
 }
 async function apiCall(payload) {
   const params = new URLSearchParams();
@@ -166,7 +173,7 @@ async function apiCall(payload) {
     const v = payload[k];
     params.append(k, (typeof v==="object"&&v!==null) ? JSON.stringify(v) : String(v===undefined||v===null?"":v));
   });
-  const r = await fetch(API+"?"+params.toString());
+  const r = await fetch(API+"?"+params.toString(), {redirect: "follow"});
   const j = await r.json();
   if(!j.ok) throw new Error(j.error);
   return j.data;
