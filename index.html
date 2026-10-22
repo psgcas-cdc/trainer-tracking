@@ -121,7 +121,7 @@ textarea{resize:vertical;min-height:70px}
 // ════════════════════════════════════════════════════════════
 // CONFIG
 // ════════════════════════════════════════════════════════════
-const API = "https://script.google.com/macros/s/AKfycbz-LLf0V0RzmnS31XV4Ykm8dqGHiCJvOpPmAPqa1DfNJzM9oqoiAKHXhVZPCFupn1A-/exec";
+
 
 // ── state ─────────────────────────────────────────────────────
 let DB = { vendors:[], modules:[], fields:[], evaluators:[], trainers:[], engagements:[], demos:[], evaluations:[], evaluationscores:[], decisions:[], feedback:[] };
@@ -140,29 +140,175 @@ function showLoading(v){ $("loading").style.display=v?"flex":"none"; }
 function showToast(msg,dur=3000){ const t=$("toast"); t.textContent=msg; t.style.display="block"; setTimeout(()=>t.style.display="none",dur); }
 
 // ── API ───────────────────────────────────────────────────────
-async function apiGet(action) {
-  const url = API + "?action=" + action + "&_=" + Date.now();
-  const r = await fetch(url, {redirect: "follow"});
-  const text = await r.text();
-  try {
-    const j = JSON.parse(text);
-    if(!j.ok) throw new Error(j.error);
-    return j.data;
-  } catch(e) {
-    console.error("Bad response for action="+action+":", text.slice(0,200));
-    throw new Error("Server returned non-JSON response");
-  }
+// ════════════════════════════════════════════════════════════
+// TURSO CONNECTION  (fill these two in)
+// ════════════════════════════════════════════════════════════
+const TURSO_URL   = "https://trainertracker-psgcas-cdc.aws-ap-south-1.turso.io";
+const TURSO_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTI2NjI2NzksImlkIjoiMDFhMTYyZjItMWUwMS03YWZkLWFhN2UtMTE0YzFjYWIxNWI0Iiwia2lkIjoiR1c2ajlHaGVYZHJleTg1Rmk0dE84TWhZay1uWG8wTmZ5bjhObnJJeEZUbyIsInJpZCI6Ijk3NTQ2ZTNlLTZkYTItNDU3My1hZDk5LTc1NWMzM2QyODRhZCJ9.N2ecOh0YfyiJXMRlRXkI8a3bcIicDfUuAkr0pHvIcs1Zevrmm5CeG-v7p-STtomLa9l7CXFrndO5EINr3VOvDA";
+
+// ── low-level helpers ─────────────────────────────────────────
+function tDecode(v){
+  if(!v || v.type==="null") return "";
+  if(v.type==="integer" || v.type==="float") return Number(v.value);
+  return v.value;
 }
-async function apiCall(payload) {
-  const params = new URLSearchParams();
-  Object.keys(payload).forEach(k => {
-    const v = payload[k];
-    params.append(k, (typeof v==="object"&&v!==null) ? JSON.stringify(v) : String(v===undefined||v===null?"":v));
+function tEncode(v){
+  if(v===null || v===undefined || v==="") return {type:"null"};
+  if(typeof v==="boolean") return {type:"integer", value: v?"1":"0"};
+  if(typeof v==="number")  return Number.isInteger(v) ? {type:"integer", value:String(v)} : {type:"float", value:v};
+  return {type:"text", value:String(v)};
+}
+function tStmt(sql, args){ return {sql: sql, args: (args||[]).map(tEncode)}; }
+
+async function tFetch(requests){
+  const r = await fetch(TURSO_URL + "/v2/pipeline", {
+    method: "POST",
+    headers: {"Authorization":"Bearer "+TURSO_TOKEN, "Content-Type":"application/json"},
+    body: JSON.stringify({requests: requests.concat([{type:"close"}])})
   });
-  const r = await fetch(API+"?"+params.toString(), {redirect: "follow"});
+  if(!r.ok) throw new Error("Database error " + r.status + ": " + (await r.text()).slice(0,200));
   const j = await r.json();
-  if(!j.ok) throw new Error(j.error);
-  return j.data;
+  j.results.forEach(res => { if(res.type==="error") throw new Error(res.error.message); });
+  return j.results;
+}
+
+function tRows(result){
+  const cols = result.cols.map(c => c.name);
+  return result.rows.map(row => {
+    const o = {};
+    cols.forEach((c,i) => {
+      const v = tDecode(row[i]);
+      o[c] = (c==="Active") ? (Number(v)===1) : v;   // 1/0 -> true/false for your page
+    });
+    return o;
+  });
+}
+
+// run ONE statement, return last inserted id
+async function tRun(sql, args){
+  const res = await tFetch([{type:"execute", stmt:tStmt(sql,args)}]);
+  return Number(res[0].response.result.last_insert_rowid) || 0;
+}
+
+// run SEVERAL statements all-or-nothing; returns the inserted id of each
+async function tTx(list){
+  const steps = [{stmt:{sql:"BEGIN IMMEDIATE"}}];
+  list.forEach((s,i) => steps.push({stmt:tStmt(s[0],s[1]), condition:{type:"ok", step:i}}));
+  const n = list.length;
+  steps.push({stmt:{sql:"COMMIT"},   condition:{type:"ok", step:n}});
+  steps.push({stmt:{sql:"ROLLBACK"}, condition:{type:"not", cond:{type:"ok", step:n+1}}});
+  const res = await tFetch([{type:"batch", batch:{steps:steps}}]);
+  const out = res[0].response.result;
+  const err = (out.step_errors||[]).find(e => e);
+  if(err) throw new Error(err.message);
+  return list.map((_,i) => Number(out.step_results[i+1].last_insert_rowid) || 0);
+}
+
+// ── READ: everything in one request ───────────────────────────
+const TABLES = {
+  vendors:"Vendors", modules:"Modules", fields:"Fields", trainers:"Trainers",
+  engagements:"Engagements", demos:"Demos", evaluators:"Evaluators",
+  evaluations:"Evaluations", evaluationscores:"EvaluationScores",
+  decisions:"Decisions", feedback:"Feedback"
+};
+async function apiGet(action){
+  if(action !== "all") throw new Error("Unknown action: " + action);
+  const keys = Object.keys(TABLES);
+  const res = await tFetch(keys.map(k => ({type:"execute", stmt:{sql:"SELECT * FROM " + TABLES[k]}})));
+  const out = {};
+  keys.forEach((k,i) => { out[k] = tRows(res[i].response.result); });
+  return out;
+}
+
+// ── WRITE: one entry per action your page uses ────────────────
+const ACTIONS = {
+  addVendor: async p => ({VendorID: await tRun(
+    "INSERT INTO Vendors (Name,ContactPerson,Phone,Email,Active) VALUES (?,?,?,?,1)",
+    [p.Name,p.ContactPerson,p.Phone,p.Email])}),
+
+  addModule: async p => ({ModuleID: await tRun(
+    "INSERT INTO Modules (Name,Description,Active) VALUES (?,?,1)",
+    [p.Name,p.Description])}),
+
+  addField: async p => ({FieldID: await tRun(
+    "INSERT INTO Fields (ModuleID,Criterion,MinMarks,MaxMarks,DisplayOrder,Active) VALUES (?,?,?,?,?,1)",
+    [p.ModuleID,p.Criterion,Number(p.MinMarks)||0,Number(p.MaxMarks)||10,Number(p.DisplayOrder)||1])}),
+
+  updateField: async p => { await tRun(
+    "UPDATE Fields SET Criterion=?,MinMarks=?,MaxMarks=?,DisplayOrder=?,Active=? WHERE FieldID=?",
+    [p.Criterion,Number(p.MinMarks),Number(p.MaxMarks),Number(p.DisplayOrder),(p.Active===true||p.Active==="true")?1:0,p.FieldID]); return {}; },
+
+  addEvaluator: async p => ({EvaluatorID: await tRun(
+    "INSERT INTO Evaluators (Name,Active) VALUES (?,1)", [p.Name])}),
+
+  updateEvaluator: async p => { await tRun(
+    "UPDATE Evaluators SET Name=?,Active=? WHERE EvaluatorID=?",
+    [p.Name,(p.Active===true||p.Active==="true")?1:0,p.EvaluatorID]); return {}; },
+
+  addTrainer: async p => {
+    const ids = await tTx([
+      ["INSERT INTO Trainers (Name,Phone,Email,Notes,Active) VALUES (?,?,?,?,1)", [p.Name,p.Phone,p.Email,p.Notes]],
+      ["INSERT INTO Engagements (TrainerID,VendorID,Type,StartDate) VALUES (last_insert_rowid(),?,?,?)", [p.VendorID,p.Type,p.StartDate||fmtToday()]]
+    ]);
+    return {TrainerID: ids[0], EngagementID: ids[1]};
+  },
+
+  editTrainer: async p => { await tRun(
+    "UPDATE Trainers SET Name=?,Phone=?,Email=?,Notes=? WHERE TrainerID=?",
+    [p.Name,p.Phone,p.Email,p.Notes,p.TrainerID]); return {}; },
+
+  addEngagement: async p => {
+    const ids = await tTx([
+      ["UPDATE Engagements SET EndDate=? WHERE TrainerID=? AND (EndDate IS NULL OR EndDate='')", [p.StartDate,p.TrainerID]],
+      ["INSERT INTO Engagements (TrainerID,VendorID,Type,StartDate) VALUES (?,?,?,?)", [p.TrainerID,p.VendorID,p.Type,p.StartDate]]
+    ]);
+    return {EngagementID: ids[1]};
+  },
+
+  scheduleDemo: async p => ({DemoID: await tRun(
+    "INSERT INTO Demos (TrainerID,ModuleID,Topic,DemoDate,Status) VALUES (?,?,?,?,'SCHEDULED')",
+    [p.TrainerID,p.ModuleID,p.Topic,p.DemoDate])}),
+
+  editDemo: async p => {
+    if(p.Status==="CANCELLED")
+      await tRun("UPDATE Demos SET Topic=?,DemoDate=?,ModuleID=?,Status='CANCELLED' WHERE DemoID=?", [p.Topic,p.DemoDate,p.ModuleID,p.DemoID]);
+    else
+      await tRun("UPDATE Demos SET Topic=?,DemoDate=?,ModuleID=? WHERE DemoID=?", [p.Topic,p.DemoDate,p.ModuleID,p.DemoID]);
+    return {};
+  },
+
+  submitEvaluation: async p => {
+    const scores = Array.isArray(p.Scores) ? p.Scores : [];
+    const list = [["INSERT INTO Evaluations (DemoID,EvaluatorID,Remarks,SubmittedOn) VALUES (?,?,?,?)", [p.DemoID,p.EvaluatorID,p.Remarks,fmtToday()]]];
+    scores.forEach(sc => list.push([
+      "INSERT INTO EvaluationScores (EvalID,FieldID,Criterion,Score,MinAtTime,MaxAtTime) VALUES ((SELECT MAX(EvalID) FROM Evaluations),?,?,?,?,?)",
+      [sc.FieldID,sc.Criterion,Number(sc.Score)||0,Number(sc.MinAtTime)||0,Number(sc.MaxAtTime)||0]]));
+    list.push(["UPDATE Demos SET Status='EVALUATED' WHERE DemoID=? AND Status='SCHEDULED'", [p.DemoID]]);
+    const ids = await tTx(list);
+    return {EvalID: ids[0]};
+  },
+
+  decideDemo: async p => {
+    const level = p.Level || "ALL";
+    const ids = await tTx([
+      ["UPDATE Demos SET Status='DECIDED',Outcome=?,Level=?,RejectScope=?,FinalRemarks=?,DecidedBy=? WHERE DemoID=?",
+        [p.Outcome,level,p.RejectScope,p.FinalRemarks,p.DecidedBy,p.DemoID]],
+      ["INSERT INTO Decisions (TrainerID,ModuleID,Level,Status,EffectiveDate,Reason,DemoID) " +
+       "SELECT TrainerID, CASE WHEN ?='PERM_REJECT' AND ?='PSG' THEN NULL ELSE ModuleID END, ?, ?, DemoDate, ?, DemoID FROM Demos WHERE DemoID=?",
+        [p.Outcome,p.RejectScope,level,p.Outcome,p.FinalRemarks,p.DemoID]]
+    ]);
+    return {DecisionID: ids[1]};
+  },
+
+  addFeedback: async p => ({FeedbackID: await tRun(
+    "INSERT INTO Feedback (TrainerID,TrainingDate,Session,BatchDept,Feedback,Rating) VALUES (?,?,?,?,?,?)",
+    [p.TrainerID,p.TrainingDate,p.Session,p.BatchDept,p.Feedback,p.Rating])})
+};
+
+async function apiCall(payload){
+  const fn = ACTIONS[payload.action];
+  if(!fn) throw new Error("Unknown action: " + payload.action);
+  return await fn(payload);
 }
 
 // ── data loading: ONE request fetches everything ──────────────
