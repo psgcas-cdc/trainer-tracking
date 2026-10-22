@@ -172,23 +172,38 @@ async function apiCall(payload) {
   return j.data;
 }
 
-async function loadSheets(names) {
+const BUNDLES = {
+  dashboard:      { action:"dashboard",      keys:["trainers","demos","decisions"] },
+  scheduled:      { action:"scheduled",      keys:["demos","trainers","modules","evaluations"] },
+  evaluated:      { action:"evaluated",      keys:["demos","trainers","modules","evaluations","evaluationscores","fields"] },
+  "schedule-demo":{ action:"scheduleBundle", keys:["trainers","modules","vendors","engagements"] }
+};
+
+async function loadSheets(names, page) {
   const toFetch = names.filter(n => !DB._loaded || !DB._loaded.has(n));
   if (!toFetch.length) return;
-  // if everything is needed and nothing loaded yet, use bulk fetch
-  const allKeys = Object.keys(DB).filter(k => k !== "_loaded");
-  const needsAll = allKeys.every(k => toFetch.includes(k));
-  if (needsAll) {
-    const data = await apiGet("all");
+
+  // use a bundle if available and at least one of its keys needs fetching
+  const bundle = page && BUNDLES[page];
+  if (bundle && bundle.keys.some(k => toFetch.includes(k))) {
+    const data = await apiGet(bundle.action);
     Object.keys(data).forEach(k => { DB[k] = data[k]; });
     if (!DB._loaded) DB._loaded = new Set();
-    allKeys.forEach(k => DB._loaded.add(k));
-  } else {
-    const results = await Promise.all(toFetch.map(n => apiGet(n)));
-    toFetch.forEach((n, i) => { DB[n] = results[i]; });
-    if (!DB._loaded) DB._loaded = new Set();
-    toFetch.forEach(n => DB._loaded.add(n));
+    bundle.keys.forEach(k => DB._loaded.add(k));
+    // fetch any remaining sheets not covered by the bundle
+    const stillNeeded = toFetch.filter(n => !bundle.keys.includes(n));
+    if (stillNeeded.length) {
+      const results = await Promise.all(stillNeeded.map(n => apiGet(n)));
+      stillNeeded.forEach((n, i) => { DB[n] = results[i]; if (!DB._loaded) DB._loaded = new Set(); DB._loaded.add(n); });
+    }
+    return;
   }
+
+  // no bundle — parallel fetch
+  const results = await Promise.all(toFetch.map(n => apiGet(n)));
+  toFetch.forEach((n, i) => { DB[n] = results[i]; });
+  if (!DB._loaded) DB._loaded = new Set();
+  toFetch.forEach(n => DB._loaded.add(n));
 }
 
 async function loadAll(sheetsToRefresh) {
@@ -206,7 +221,7 @@ let currentPage = "dashboard", currentParams = {};
 async function loadPageSheets(page, params) {
   const needed = PAGE_SHEETS[page] || Object.keys(DB).filter(k => k !== "_loaded");
   showLoading(true);
-  try { await loadSheets(needed); } catch(e) { alert("Could not load data: " + e.message); }
+  try { await loadSheets(needed, page); } catch(e) { alert("Could not load data: " + e.message); }
   showLoading(false);
 }
 
