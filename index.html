@@ -1024,6 +1024,8 @@ function trainerDetail(m, params={}) {
         <button class="btn" onclick="nav('add-feedback',{trainerID:'${tid}'})">+ Feedback</button>
         <button class="btn ghost" onclick="showEditTrainer('${tid}')">Edit</button>
         <button class="btn ghost sm" onclick="showChangeEngagement('${tid}')">Change Vendor/Type</button>
+        ${t["Trainer Profile"]&&t["Trainer Profile"]!=="File not found"?`<a href="${esc(t["Trainer Profile"])}" target="_blank" class="btn ghost sm">Profile</a>`:""}
+        ${t["Trainer Form"]&&t["Trainer Form"]!=="File not found"?`<a href="${esc(t["Trainer Form"])}" target="_blank" class="btn ghost sm">Form</a>`:""}
       </div>
     </div>
     <div class="jump"><a href="#sec-status">Status</a><a href="#sec-vendor">Vendor history</a><a href="#sec-demos">Demos</a><a href="#sec-feedback">Feedback</a></div>
