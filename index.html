@@ -117,6 +117,7 @@ textarea{resize:vertical;min-height:70px}
 <div id="modal-overlay" class="hidden"><div id="modal-box"></div></div>
 
 <script>
+
 // ════════════════════════════════════════════════════════════
 // CONFIG
 // ════════════════════════════════════════════════════════════
@@ -124,23 +125,8 @@ const API = "https://script.google.com/macros/s/AKfycbz-LLf0V0RzmnS31XV4Ykm8dqGH
 
 // ── state ─────────────────────────────────────────────────────
 let DB = { vendors:[], modules:[], fields:[], evaluators:[], trainers:[], engagements:[], demos:[], evaluations:[], evaluationscores:[], decisions:[], feedback:[] };
-
-const PAGE_SHEETS = {
-  dashboard:       ["trainers","engagements","demos","evaluations","decisions"],
-  trainers:        ["trainers","engagements","vendors","decisions","modules"],
-  active:          ["trainers","engagements","vendors","decisions","modules"],
-  scheduled:       ["demos","trainers","modules","evaluations"],
-  evaluated:       ["demos","trainers","modules","evaluations","evaluationscores","fields"],
-  followups:       ["demos","trainers","modules"],
-  "schedule-demo": ["trainers","modules","vendors","engagements"],
-  "demo-detail":   ["demos","trainers","modules","evaluators","evaluations","evaluationscores","fields"],
-  "add-feedback":  ["trainers"],
-  "trainer-detail":["trainers","engagements","vendors","demos","evaluations","decisions","modules","feedback"],
-  modules:         ["modules"],
-  vendors:         ["vendors"],
-  fields:          ["fields","modules"],
-  evaluators:      ["evaluators"]
-};
+let DB_READY = false;
+let currentPage = "dashboard", currentParams = {};
 
 // ── utils ─────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
@@ -179,59 +165,29 @@ async function apiCall(payload) {
   return j.data;
 }
 
-const BUNDLES = {
-  dashboard:      { action:"dashboard",      keys:["trainers","demos","decisions"] },
-  scheduled:      { action:"scheduled",      keys:["demos","trainers","modules","evaluations"] },
-  evaluated:      { action:"evaluated",      keys:["demos","trainers","modules","evaluations","evaluationscores","fields"] },
-  "schedule-demo":{ action:"scheduleBundle", keys:["trainers","modules","vendors","engagements"] }
-};
-
-async function loadSheets(names, page) {
-  const toFetch = names.filter(n => !DB._loaded || !DB._loaded.has(n));
-  if (!toFetch.length) return;
-
-  // use a bundle if available and at least one of its keys needs fetching
-  const bundle = page && BUNDLES[page];
-  if (bundle && bundle.keys.some(k => toFetch.includes(k))) {
-    const data = await apiGet(bundle.action);
-    Object.keys(data).forEach(k => { DB[k] = data[k]; });
-    if (!DB._loaded) DB._loaded = new Set();
-    bundle.keys.forEach(k => DB._loaded.add(k));
-    // fetch any remaining sheets not covered by the bundle
-    const stillNeeded = toFetch.filter(n => !bundle.keys.includes(n));
-    if (stillNeeded.length) {
-      const results = await Promise.all(stillNeeded.map(n => apiGet(n)));
-      stillNeeded.forEach((n, i) => { DB[n] = results[i]; if (!DB._loaded) DB._loaded = new Set(); DB._loaded.add(n); });
-    }
-    return;
-  }
-
-  // no bundle — parallel fetch
-  const results = await Promise.all(toFetch.map(n => apiGet(n)));
-  toFetch.forEach((n, i) => { DB[n] = results[i]; });
-  if (!DB._loaded) DB._loaded = new Set();
-  toFetch.forEach(n => DB._loaded.add(n));
-}
-
-async function loadAll(sheetsToRefresh) {
-  // if specific sheets given, only invalidate those
-  if (sheetsToRefresh && sheetsToRefresh.length) {
-    sheetsToRefresh.forEach(k => DB._loaded && DB._loaded.delete(k));
-  } else {
-    if (DB._loaded) DB._loaded.clear();
-  }
-  await loadPageSheets(currentPage, currentParams);
-}
-
-let currentPage = "dashboard", currentParams = {};
-
-async function loadPageSheets(page, params) {
-  const needed = PAGE_SHEETS[page] || Object.keys(DB).filter(k => k !== "_loaded");
+// ── data loading: ONE request fetches everything ──────────────
+async function loadPageSheets() {
+  if (DB_READY) return;
   showLoading(true);
-  try { await loadSheets(needed, page); } catch(e) { alert("Could not load data: " + e.message); }
+  try {
+    const data = await apiGet("all");
+    Object.keys(data).forEach(k => { DB[k] = data[k]; });
+    DB_READY = true;
+  } catch(e) { alert("Could not load data: " + e.message); }
   showLoading(false);
 }
 
+// after a save: one request refreshes everything (arguments are ignored)
+async function loadAll() {
+  const data = await apiGet("all");
+  Object.keys(data).forEach(k => { DB[k] = data[k]; });
+  DB_READY = true;
+}
+
+// silent background refresh, never blocks the screen
+async function refreshAll() {
+  try { await loadAll(); } catch(e) { console.warn("Background refresh failed", e); }
+}
 
 // ── router ────────────────────────────────────────────────────
 function nav(page, params={}) {
@@ -554,8 +510,11 @@ window.submitScheduleDemo = async function() {
   if(!trainer||!module){ errEl.textContent="Trainer and Module are required."; errEl.classList.remove("hidden"); return; }
   try {
     showLoading(true);
-    await apiCall({action:"scheduleDemo", TrainerID:trainer, ModuleID:module, Topic:$("sd-topic").value.trim(), DemoDate:$("sd-date").value});
-    await loadAll(["demos"]); showToast("Demo scheduled."); nav("scheduled");
+    const topic=$("sd-topic").value.trim(), date=$("sd-date").value;
+    const res = await apiCall({action:"scheduleDemo", TrainerID:trainer, ModuleID:module, Topic:topic, DemoDate:date});
+    DB.demos.push({DemoID:res.DemoID, TrainerID:trainer, ModuleID:module, Topic:topic, DemoDate:date,
+      Status:"SCHEDULED", Outcome:"", Level:"", RejectScope:"", FinalRemarks:"", DecidedBy:""});
+    showToast("Demo scheduled."); nav("scheduled"); refreshAll();
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -754,8 +713,14 @@ window.submitEvaluation = async function(did) {
   });
   try {
     showLoading(true);
-    await apiCall({action:"submitEvaluation", DemoID:did, EvaluatorID:evaluatorID, Remarks:$("ev-remarks").value.trim(), Scores:scores});
-    await loadAll(["demos","evaluations","evaluationscores"]); showToast("Evaluation submitted."); nav("scheduled");
+    const remarks=$("ev-remarks").value.trim();
+    const res = await apiCall({action:"submitEvaluation", DemoID:did, EvaluatorID:evaluatorID, Remarks:remarks, Scores:scores});
+    DB.evaluations.push({EvalID:res.EvalID, DemoID:did, EvaluatorID:evaluatorID, Remarks:remarks, SubmittedOn:fmtToday()});
+    scores.forEach(sc => DB.evaluationscores.push({ScoreID:"tmp"+Math.random(), EvalID:res.EvalID,
+      FieldID:sc.FieldID, Criterion:sc.Criterion, Score:sc.Score, MinAtTime:sc.MinAtTime, MaxAtTime:sc.MaxAtTime}));
+    const dm = DB.demos.find(x=>String(x.DemoID)===String(did));
+    if (dm && dm.Status==="SCHEDULED") dm.Status="EVALUATED";
+    showToast("Evaluation submitted."); nav("scheduled"); refreshAll();
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -766,9 +731,16 @@ window.submitDecide = async function(did, trainerID) {
   if(outcome==="PERM_REJECT"&&!$("dec-remarks").value.trim()){ errEl.textContent="Please write the reason for a permanent rejection."; errEl.classList.remove("hidden"); return; }
   try {
     showLoading(true);
-    await apiCall({action:"decideDemo", DemoID:did, Outcome:outcome, Level:outcome==="SELECTED"?$("dec-level").value:"ALL", RejectScope:outcome==="PERM_REJECT"?$("dec-scope").value:"", DecidedBy:$("dec-by").value, FinalRemarks:$("dec-remarks").value.trim()});
-    await loadAll(["demos","decisions"]); showToast("Outcome recorded.");
-    nav("trainer-detail",{id:trainerID});
+    const level = outcome==="SELECTED" ? $("dec-level").value : "ALL";
+    const scope = outcome==="PERM_REJECT" ? $("dec-scope").value : "";
+    const by = $("dec-by").value, remarks = $("dec-remarks").value.trim();
+    await apiCall({action:"decideDemo", DemoID:did, Outcome:outcome, Level:level, RejectScope:scope, DecidedBy:by, FinalRemarks:remarks});
+    const d = DB.demos.find(x=>String(x.DemoID)===String(did));
+    Object.assign(d, {Status:"DECIDED", Outcome:outcome, Level:level, RejectScope:scope, FinalRemarks:remarks, DecidedBy:by});
+    DB.decisions.push({DecisionID:"tmp"+Date.now(), TrainerID:d.TrainerID,
+      ModuleID:(outcome==="PERM_REJECT"&&scope==="PSG")?"":d.ModuleID,
+      Level:level, Status:outcome, EffectiveDate:d.DemoDate, Reason:remarks, DemoID:did});
+    showToast("Outcome recorded."); nav("trainer-detail",{id:trainerID}); refreshAll();
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -845,7 +817,6 @@ function evaluated(m, params={}) {
     </table></div></div>
   `;
 }
-
 
 // ── Follow-ups ─────────────────────────────────────────────────
 function followups(m) {
@@ -990,7 +961,7 @@ window.exportActiveCSV = function() {
   });
   const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\r\n");
   const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob(["﻿"+csv],{type:"text/csv;charset=utf-8"}));
+  a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));
   a.download="active_trainers.csv"; a.click();
 };
 
@@ -1098,7 +1069,7 @@ window.showEditDemo = function(did) {
           ${activeModules().map(m => `<option value="${m.ModuleID}" ${String(m.ModuleID)===String(d.ModuleID)?"selected":""}>${esc(m.Name)}</option>`).join("")}
         </select>
       </div>
-      <div class="field"><label class="lbl">Demo Date *</label><input type="date" id="ed-date" value="${d.DemoDate}"></div>
+      <div class="field"><label class="lbl">Demo Date *</label><input type="date" id="ed-date" value="${String(d.DemoDate).slice(0,10)}"></div>
       <div class="field full"><label class="lbl">Topic</label><input type="text" id="ed-topic" value="${esc(d.Topic||"")}"></div>
     </div>
     <div class="form-actions">
@@ -1121,7 +1092,7 @@ window.submitEditDemo = async function(did, trainerID, cancel) {
       Topic: $("ed-topic").value.trim(),
       Status: cancel || ""
     });
-    await loadAll(["demos"]);
+    await loadAll();
     closeModal();
     showToast(cancel ? "Demo cancelled." : "Demo updated.");
     nav("scheduled");
@@ -1159,8 +1130,10 @@ window.submitFeedback = async function() {
   if(!trainer||!text){ errEl.textContent="Trainer and Feedback are required."; errEl.classList.remove("hidden"); return; }
   try {
     showLoading(true);
-    await apiCall({action:"addFeedback", TrainerID:trainer, TrainingDate:$("fb-date").value, Session:$("fb-session").value, BatchDept:$("fb-batch").value, Feedback:text, Rating:$("fb-rating").value});
-    await loadAll(["feedback"]); showToast("Feedback saved."); nav("trainer-detail",{id:trainer});
+    const row = {TrainerID:trainer, TrainingDate:$("fb-date").value, Session:$("fb-session").value, BatchDept:$("fb-batch").value, Feedback:text, Rating:$("fb-rating").value};
+    const res = await apiCall(Object.assign({action:"addFeedback"}, row));
+    DB.feedback.push(Object.assign({FeedbackID:res.FeedbackID}, row));
+    showToast("Feedback saved."); nav("trainer-detail",{id:trainer}); refreshAll();
   } catch(e){ errEl.textContent=e.message; errEl.classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1245,7 +1218,7 @@ window.submitAddTrainer = async function() {
   try {
     showLoading(true);
     const res=await apiCall({action:"addTrainer", Name:name, Phone:$("at-phone").value.trim(), Email:$("at-email").value.trim(), VendorID:vendor, Type:$("at-type").value, Notes:$("at-notes").value.trim(), StartDate:fmtToday()});
-    await loadAll(["trainers","engagements"]); closeModal(); showToast("Trainer added."); nav("trainer-detail",{id:res.TrainerID});
+    await loadAll(); closeModal(); showToast("Trainer added."); nav("trainer-detail",{id:res.TrainerID});
   } catch(e){ $("at-err").textContent=e.message; $("at-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1268,7 +1241,7 @@ window.submitEditTrainer = async function(tid) {
   try {
     showLoading(true);
     await apiCall({action:"editTrainer", TrainerID:tid, Name:name, Phone:$("et-phone").value.trim(), Email:$("et-email").value.trim(), Notes:$("et-notes").value.trim()});
-    await loadAll(["trainers"]);; closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
+    await loadAll(); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
   } catch(e){ $("et-err").textContent=e.message; $("et-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1292,7 +1265,7 @@ window.submitChangeEngagement = async function(tid) {
   try {
     showLoading(true);
     await apiCall({action:"addEngagement", TrainerID:tid, VendorID:vendor, Type:$("ce-type").value, StartDate:$("ce-date").value});
-    await loadAll(["engagements"]); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
+    await loadAll(); closeModal(); showToast("Updated."); nav("trainer-detail",{id:tid});
   } catch(e){ $("ce-err").textContent=e.message; $("ce-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1309,7 +1282,7 @@ window.showAddModule = function() {
 window.submitAddModule = async function() {
   const name=$("am-name").value.trim();
   if(!name){ $("am-err").textContent="Name is required."; $("am-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addModule", Name:name, Description:$("am-desc").value.trim()}); await loadAll(["modules"]); closeModal(); showToast("Module added."); nav("modules"); }
+  try { showLoading(true); await apiCall({action:"addModule", Name:name, Description:$("am-desc").value.trim()}); await loadAll(); closeModal(); showToast("Module added."); nav("modules"); }
   catch(e){ $("am-err").textContent=e.message; $("am-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1328,7 +1301,7 @@ window.showAddVendor = function() {
 window.submitAddVendor = async function() {
   const name=$("av-name").value.trim();
   if(!name){ $("av-err").textContent="Name is required."; $("av-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addVendor", Name:name, ContactPerson:$("av-contact").value.trim(), Phone:$("av-phone").value.trim(), Email:$("av-email").value.trim()}); await loadAll(["vendors"]); closeModal(); showToast("Vendor added."); nav("vendors"); }
+  try { showLoading(true); await apiCall({action:"addVendor", Name:name, ContactPerson:$("av-contact").value.trim(), Phone:$("av-phone").value.trim(), Email:$("av-email").value.trim()}); await loadAll(); closeModal(); showToast("Vendor added."); nav("vendors"); }
   catch(e){ $("av-err").textContent=e.message; $("av-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1350,7 +1323,7 @@ window.showAddField = function() {
 window.submitAddField = async function() {
   const module=$("af-module").value, crit=$("af-crit").value.trim();
   if(!module||!crit){ $("af-err").textContent="Module and Criterion are required."; $("af-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addField", ModuleID:module, Criterion:crit, MinMarks:Number($("af-min").value)||0, MaxMarks:Number($("af-max").value)||10, DisplayOrder:Number($("af-order").value)||1}); await loadAll(["fields"]); closeModal(); showToast("Field added."); nav("fields"); }
+  try { showLoading(true); await apiCall({action:"addField", ModuleID:module, Criterion:crit, MinMarks:Number($("af-min").value)||0, MaxMarks:Number($("af-max").value)||10, DisplayOrder:Number($("af-order").value)||1}); await loadAll(); closeModal(); showToast("Field added."); nav("fields"); }
   catch(e){ $("af-err").textContent=e.message; $("af-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1371,7 +1344,7 @@ window.showEditField = function(fid) {
 window.submitEditField = async function(fid) {
   const crit=$("ef-crit").value.trim();
   if(!crit){ $("ef-err").textContent="Criterion is required."; $("ef-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"updateField", FieldID:fid, Criterion:crit, MinMarks:Number($("ef-min").value), MaxMarks:Number($("ef-max").value), DisplayOrder:Number($("ef-order").value), Active:$("ef-active").value==="true"}); await loadAll(["fields"]); closeModal(); showToast("Field updated."); nav("fields"); }
+  try { showLoading(true); await apiCall({action:"updateField", FieldID:fid, Criterion:crit, MinMarks:Number($("ef-min").value), MaxMarks:Number($("ef-max").value), DisplayOrder:Number($("ef-order").value), Active:$("ef-active").value==="true"}); await loadAll(); closeModal(); showToast("Field updated."); nav("fields"); }
   catch(e){ $("ef-err").textContent=e.message; $("ef-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1387,7 +1360,7 @@ window.showAddEvaluator = function() {
 window.submitAddEvaluator = async function() {
   const name=$("ae-name").value.trim();
   if(!name){ $("ae-err").textContent="Name is required."; $("ae-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"addEvaluator", Name:name}); await loadAll(["evaluators"]); closeModal(); showToast("Evaluator added."); nav("evaluators"); }
+  try { showLoading(true); await apiCall({action:"addEvaluator", Name:name}); await loadAll(); closeModal(); showToast("Evaluator added."); nav("evaluators"); }
   catch(e){ $("ae-err").textContent=e.message; $("ae-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1405,7 +1378,7 @@ window.showEditEvaluator = function(eid) {
 window.submitEditEvaluator = async function(eid) {
   const name=$("ee-name").value.trim();
   if(!name){ $("ee-err").textContent="Name is required."; $("ee-err").classList.remove("hidden"); return; }
-  try { showLoading(true); await apiCall({action:"updateEvaluator", EvaluatorID:eid, Name:name, Active:$("ee-active").value==="true"}); await loadAll(["evaluators"]); closeModal(); showToast("Updated."); nav("evaluators"); }
+  try { showLoading(true); await apiCall({action:"updateEvaluator", EvaluatorID:eid, Name:name, Active:$("ee-active").value==="true"}); await loadAll(); closeModal(); showToast("Updated."); nav("evaluators"); }
   catch(e){ $("ee-err").textContent=e.message; $("ee-err").classList.remove("hidden"); }
   showLoading(false);
 };
@@ -1414,6 +1387,7 @@ window.submitEditEvaluator = async function(eid) {
 (async function boot() {
   nav("dashboard");
 })();
+
 </script>
 </body>
 </html>
