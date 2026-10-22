@@ -47,6 +47,7 @@ td.actions a{color:var(--accent);text-decoration:none;margin-right:10px;font-siz
 .badge.green{background:#dcfce7;color:#166534}.badge.amber{background:#fef3c7;color:#92400e}
 .badge.red{background:#fee2e2;color:#991b1b}.badge.blue{background:#dbeafe;color:#1e40af}
 .badge.grey{background:#f3f4f6;color:#4b5563}.badge.purple{background:#f3e8ff;color:#6b21a8}
+.badge.teal{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600;background:#ccfbf1;color:#115e59}
 .tag{display:inline-block;padding:2px 7px;background:#eff6ff;color:var(--accent);border-radius:4px;font-size:11px;margin:2px}
 .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px}
 .filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:500;color:var(--muted)}
@@ -104,6 +105,7 @@ textarea{resize:vertical;min-height:70px}
     <li><a href="#" data-page="followups">Follow-ups (Redo)</a></li>
     <div class="section-label">Records</div>
     <li><a href="#" data-page="add-feedback">Add Feedback</a></li>
+    <li><a href="#" data-page="action-taken">Action Taken</a></li>
     <div class="section-label">Admin</div>
     <li><a href="#" data-page="modules">Modules</a></li>
     <li><a href="#" data-page="vendors">Vendors</a></li>
@@ -300,6 +302,37 @@ const ACTIONS = {
     return {DecisionID: ids[1]};
   },
 
+  updateDecision: async p => {
+    const level = p.Level || "ALL";
+    await tTx([
+      ["UPDATE Demos SET Outcome=?,Level=?,RejectScope=?,FinalRemarks=?,DecidedBy=? WHERE DemoID=?",
+        [p.Outcome,level,p.RejectScope,p.FinalRemarks,p.DecidedBy,p.DemoID]],
+      ["UPDATE Decisions SET Status=?,Level=?,Reason=?,ModuleID=(CASE WHEN ?='PERM_REJECT' AND ?='PSG' THEN NULL ELSE (SELECT ModuleID FROM Demos WHERE DemoID=?) END) WHERE DemoID=?",
+        [p.Outcome,level,p.FinalRemarks,p.Outcome,p.RejectScope,p.DemoID,p.DemoID]]
+    ]);
+    return {};
+  },
+
+  updateEvaluation: async p => {
+    const scores = Array.isArray(p.Scores) ? p.Scores : [];
+    const list = [["UPDATE Evaluations SET EvaluatorID=?,Remarks=? WHERE EvalID=?", [p.EvaluatorID,p.Remarks,p.EvalID]]];
+    scores.forEach(sc => list.push(["UPDATE EvaluationScores SET Score=? WHERE EvalID=? AND FieldID=?", [Number(sc.Score)||0,p.EvalID,sc.FieldID]]));
+    await tTx(list);
+    return {};
+  },
+
+  recordAction: async p => {
+    const level = p.Level || "ALL";
+    const fresh = (p.FreshStart===true || p.FreshStart==="true");
+    const list = [];
+    if (fresh) list.push(["INSERT INTO Decisions (TrainerID,ModuleID,Level,Status,EffectiveDate,Reason,ActionType,TakenBy) VALUES (?,NULL,'ALL','FRESH_START',?,?,'Fresh start',?)",
+      [p.TrainerID,fmtToday(),p.Reason,p.TakenBy]]);
+    list.push(["INSERT INTO Decisions (TrainerID,ModuleID,Level,Status,EffectiveDate,Reason,ActionType,TakenBy) VALUES (?,?,?,?,?,?,'Action',?)",
+      [p.TrainerID,p.ModuleID,level,p.Status,fmtToday(),p.Reason,p.TakenBy]]);
+    const ids = await tTx(list);
+    return {DecisionID: ids[ids.length-1]};
+  },
+
   addFeedback: async p => ({FeedbackID: await tRun(
     "INSERT INTO Feedback (TrainerID,TrainingDate,Session,BatchDept,Feedback,Rating) VALUES (?,?,?,?,?,?)",
     [p.TrainerID,p.TrainingDate,p.Session,p.BatchDept,p.Feedback,p.Rating])})
@@ -346,7 +379,7 @@ function nav(page, params={}) {
     m.innerHTML = ""; m.className = "page-enter";
     const pages = { dashboard, trainers, active, scheduled, evaluated, followups,
       "schedule-demo": scheduleDemoPage, "demo-detail": demoDetail,
-      "add-feedback": addFeedbackPage, "trainer-detail": trainerDetail,
+      "add-feedback": addFeedbackPage, "trainer-detail": trainerDetail, "action-taken": actionTakenPage,
       modules, vendors, fields, evaluators };
     if (pages[page]) pages[page](m, params);
     else m.innerHTML = "<p>Page not found.</p>";
@@ -370,7 +403,10 @@ function currentEngagement(tid) {
   return DB.engagements.find(e=>String(e.TrainerID)===String(tid)&&(!e.EndDate||e.EndDate===""))||null;
 }
 function trainerDecisions(tid) {
-  return DB.decisions.filter(d=>String(d.TrainerID)===String(tid));
+  const all=DB.decisions.filter(d=>String(d.TrainerID)===String(tid));
+  let fsId=0;
+  all.forEach(d=>{ if(d.Status==="FRESH_START"&&Number(d.DecisionID)>fsId) fsId=Number(d.DecisionID); });
+  return all.filter(d=>d.Status!=="FRESH_START"&&(fsId===0||isNaN(Number(d.DecisionID))||Number(d.DecisionID)>fsId));
 }
 
 function levelCells(decisions, modules) {
@@ -469,7 +505,7 @@ const demoBadge = d => {
   if(d.Status==="SCHEDULED") return "blue";
   if(d.Status==="EVALUATED") return "purple";
   if(d.Status==="DECIDED"){
-    return {SELECTED:"green",REJECTED:"amber",REDO:"blue",PERM_REJECT:"red"}[d.Outcome]||"grey";
+    return {SELECTED:"green",BACKUP:"teal",REJECTED:"amber",REDO:"blue",PERM_REJECT:"red"}[d.Outcome]||"grey";
   }
   return "grey";
 };
@@ -478,6 +514,7 @@ const demoStatusLabel = d => {
   if(d.Status==="EVALUATED") return "Awaiting decision";
   if(d.Status==="DECIDED"){
     if(d.Outcome==="SELECTED") return "Selected"+(d.Level&&d.Level!=="ALL"?" ("+d.Level+")":"");
+    if(d.Outcome==="BACKUP") return "Backup"+(d.Level&&d.Level!=="ALL"?" ("+d.Level+")":"");
     if(d.Outcome==="PERM_REJECT") return d.RejectScope==="PSG"?"Rejected for PSG":"Rejected for module";
     if(d.Outcome==="REJECTED") return "Rejected";
     if(d.Outcome==="REDO") return "Redo";
@@ -526,7 +563,7 @@ function dashboard(m) {
             <td><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">${esc(trainerName(d.TrainerID))}</a></td>
             <td>${esc(moduleName(d.ModuleID))}</td><td>${fmt(d.DemoDate)}</td>
             <td>${evalCount} evaluator${evalCount!==1?"s":""}</td>
-            <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">Decide →</a></td>
+            <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}',mode:'decide'});return false;">Decide →</a></td>
           </tr>`;
         }).join("")}
       </table></div></div>`:""}
@@ -536,7 +573,7 @@ function dashboard(m) {
         <tr><th>Trainer</th><th>Module</th><th>Topic</th><th></th></tr>
         ${scheduledToday.map(d=>`<tr>
           <td>${esc(trainerName(d.TrainerID))}</td><td>${esc(moduleName(d.ModuleID))}</td><td>${esc(d.Topic)}</td>
-          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">Evaluate</a></td>
+          <td class="actions"><a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}',mode:'evaluate'});return false;">Evaluate</a></td>
         </tr>`).join("")}
       </table></div></div>`:""}
   `;
@@ -563,7 +600,8 @@ function scheduled(m) {
           <td><span class="badge ${d.Status==="SCHEDULED"?"blue":"purple"}">${d.Status==="SCHEDULED"?"Scheduled":"Awaiting decision"}</span></td>
           <td>${evalCount}</td>
           <td class="actions">
-            <a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}'});return false;">${d.Status==="SCHEDULED"?"Evaluate":"Evaluate / Decide →"}</a>
+            <a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}',mode:'evaluate'});return false;">Evaluate</a>
+            ${d.Status==="EVALUATED"?`<a href="#" onclick="nav('demo-detail',{id:'${d.DemoID}',mode:'decide'});return false;">Decide</a>`:""}
             ${d.Status==="SCHEDULED"?`<a href="#" onclick="showEditDemo('${d.DemoID}');return false;">Edit</a>`:""}
           </td>
         </tr>`;
@@ -670,6 +708,7 @@ function demoDetail(m, params={}) {
   const did=String(params.id);
   const demo=DB.demos.find(d=>String(d.DemoID)===did);
   if(!demo){ m.innerHTML="<p>Demo not found.</p>"; return; }
+  const mode=params.mode||"view";
 
   const evals=DB.evaluations.filter(ev=>String(ev.DemoID)===did);
   const mods=activeModules();
@@ -721,7 +760,7 @@ function demoDetail(m, params={}) {
           ${evals.length>1?`<td>${totals.length?Math.round(totals.reduce((a,t)=>a+t.score,0)/totals.length*10)/10:"-"} avg</td>`:""}
         </tr>
       </table></div>
-      ${evals.map(ev=>`<div style="margin-top:12px;font-size:13px"><b>${esc(evaluatorName(ev.EvaluatorID))}:</b> ${esc(ev.Remarks)||'<span class="muted">No remarks</span>'}</div>`).join("")}
+      ${evals.map(ev=>`<div style="margin-top:12px;font-size:13px"><b>${esc(evaluatorName(ev.EvaluatorID))}:</b> ${esc(ev.Remarks)||'<span class="muted">No remarks</span>'} <a href="#" onclick="showEditEvaluation('${ev.EvalID}');return false;" style="margin-left:10px;font-size:12px;color:var(--accent);text-decoration:none">Edit</a></div>`).join("")}
     </div>`;
   } else if(evals.length&&!modFields.length){
     scoresHtml=`<div class="card"><div class="card-head"><h2>Evaluations (${evals.length})</h2></div>
@@ -731,7 +770,7 @@ function demoDetail(m, params={}) {
 
   // evaluate form (if SCHEDULED or EVALUATED - can always add more)
   let evaluateHtml="";
-  if(demo.Status==="SCHEDULED"||demo.Status==="EVALUATED"){
+  if(mode==="evaluate"&&(demo.Status==="SCHEDULED"||demo.Status==="EVALUATED")){
     const evalOptions=activeEvaluators().map(e=>`<option value="${e.EvaluatorID}">${esc(e.Name)}</option>`).join("");
     evaluateHtml=`<div class="card" id="sec-evaluate">
       <div class="card-head"><h2>Submit Evaluation</h2></div>
@@ -763,7 +802,7 @@ function demoDetail(m, params={}) {
 
   // decide form (if EVALUATED)
   let decideHtml="";
-  if(demo.Status==="EVALUATED"){
+  if(mode==="decide"&&demo.Status==="EVALUATED"){
     decideHtml=`<div class="card" id="sec-decide">
       <div class="card-head"><h2>Set Final Outcome</h2></div>
       <div class="form-grid">
@@ -772,13 +811,14 @@ function demoDetail(m, params={}) {
           <select id="dec-outcome" onchange="toggleDecideFields()">
             <option value="">-- select --</option>
             <option value="SELECTED">Selected</option>
+            <option value="BACKUP">Backup</option>
             <option value="REJECTED">Rejected (may present again)</option>
             <option value="REDO">Redo</option>
             <option value="PERM_REJECT">Permanent reject</option>
           </select>
         </div>
         <div class="field hidden" id="dec-level-row">
-          <label class="lbl">Selected for *</label>
+          <label class="lbl">Applies to *</label>
           <select id="dec-level">
             <option value="ALL">All (UG &amp; PG)</option>
             <option value="UG">UG</option>
@@ -809,7 +849,7 @@ function demoDetail(m, params={}) {
   let decidedHtml="";
   if(demo.Status==="DECIDED"){
     decidedHtml=`<div class="card">
-      <div class="card-head"><h2>Final Outcome</h2></div>
+      <div class="card-head"><h2>Final Outcome</h2><button class="btn ghost sm" onclick="showEditDecision('${did}')">Edit decision</button></div>
       <div class="info-row">
         <div class="info-item">Outcome: <span><span class="badge ${demoBadge(demo)}">${esc(demoStatusLabel(demo))}</span></span></div>
         ${demo.DecidedBy?`<div class="info-item">Decided by: <span>${esc(demo.DecidedBy)}</span></div>`:""}
@@ -824,10 +864,14 @@ function demoDetail(m, params={}) {
         <h1>${esc(trainerName(demo.TrainerID))} - ${esc(moduleName(demo.ModuleID))}</h1>
         <div class="sub">${fmt(demo.DemoDate)}${demo.Topic?" · "+esc(demo.Topic):""} · <span class="badge ${demoBadge(demo)}">${demoStatusLabel(demo)}</span></div>
       </div>
-      <a class="btn ghost sm" href="#" onclick="nav('trainer-detail',{id:'${demo.TrainerID}'});return false;">← Trainer</a>
+      <div class="btns">
+        ${(demo.Status==="SCHEDULED"||demo.Status==="EVALUATED")?`<a class="btn sm" href="#" onclick="nav('demo-detail',{id:'${did}',mode:'evaluate'});return false;">Evaluate</a>`:""}
+        ${demo.Status==="EVALUATED"?`<a class="btn sm" href="#" onclick="nav('demo-detail',{id:'${did}',mode:'decide'});return false;">Decide</a>`:""}
+        <a class="btn ghost sm" href="#" onclick="nav('trainer-detail',{id:'${demo.TrainerID}'});return false;">← Trainer</a>
+      </div>
     </div>
     ${decidedHtml}
-    ${scoresHtml}
+    ${mode==="evaluate"?"":scoresHtml}
     ${evaluateHtml}
     ${decideHtml}
   `;
@@ -846,7 +890,7 @@ window.calcEvalTotal = function() {
 
 window.toggleDecideFields = function() {
   const outcome=$("dec-outcome").value;
-  $("dec-level-row").classList.toggle("hidden", outcome!=="SELECTED");
+    $("dec-level-row").classList.toggle("hidden", outcome!=="SELECTED"&&outcome!=="BACKUP");
   $("dec-scope-row").classList.toggle("hidden", outcome!=="PERM_REJECT");
 };
 
@@ -877,7 +921,7 @@ window.submitDecide = async function(did, trainerID) {
   if(outcome==="PERM_REJECT"&&!$("dec-remarks").value.trim()){ errEl.textContent="Please write the reason for a permanent rejection."; errEl.classList.remove("hidden"); return; }
   try {
     showLoading(true);
-    const level = outcome==="SELECTED" ? $("dec-level").value : "ALL";
+    const level = (outcome==="SELECTED"||outcome==="BACKUP") ? $("dec-level").value : "ALL";
     const scope = outcome==="PERM_REJECT" ? $("dec-scope").value : "";
     const by = $("dec-by").value, remarks = $("dec-remarks").value.trim();
     await apiCall({action:"decideDemo", DemoID:did, Outcome:outcome, Level:level, RejectScope:scope, DecidedBy:by, FinalRemarks:remarks});
@@ -1128,7 +1172,8 @@ function trainerDetail(m, params={}) {
     const mid=String(mod.ModuleID),cell=cells[mid]||{UG:null,PG:null};
     const selectedLevels=["UG","PG"].filter(lv=>cell[lv]&&cell[lv].Status==="SELECTED");
     const ctrlDec=cell.UG||cell.PG;
-    return {mod,selectedLevels,ctrlDec};
+    const backupLevels=["UG","PG"].filter(lv=>cell[lv]&&cell[lv].Status==="BACKUP");
+    return {mod,selectedLevels,backupLevels,ctrlDec};
   });
 
   m.innerHTML=`
@@ -1140,6 +1185,7 @@ function trainerDetail(m, params={}) {
         <button class="btn" onclick="nav('schedule-demo',{trainerID:'${tid}'})">+ Schedule Demo</button>
         <button class="btn" onclick="nav('add-feedback',{trainerID:'${tid}'})">+ Feedback</button>
         <button class="btn ghost" onclick="showEditTrainer('${tid}')">Edit</button>
+        <button class="btn ghost" onclick="nav('action-taken',{trainerID:'${tid}'})">Take Action</button>
         <button class="btn ghost sm" onclick="showChangeEngagement('${tid}')">Change Vendor/Type</button>
         ${t["Trainer Profile"]&&t["Trainer Profile"]!=="File not found"?`<a href="${esc(t["Trainer Profile"])}" target="_blank" class="btn ghost sm">Profile</a>`:""}
         ${t["Trainer Form"]&&t["Trainer Form"]!=="File not found"?`<a href="${esc(t["Trainer Form"])}" target="_blank" class="btn ghost sm">Form</a>`:""}
@@ -1151,11 +1197,9 @@ function trainerDetail(m, params={}) {
       <div class="card-head"><h2>Status by module</h2></div>
       <div class="tbl-wrap"><table>
         <tr><th>Module</th><th>Current status</th></tr>
-        ${moduleRows.map(({mod,selectedLevels,ctrlDec})=>`<tr>
+        ${moduleRows.map(({mod,selectedLevels,backupLevels,ctrlDec})=>`<tr>
           <td><b>${esc(mod.Name)}</b></td>
-          <td>${selectedLevels.length?`<span class="badge green">Selected for ${selectedLevels.length===2?"All":selectedLevels[0]}</span>`
-              :ctrlDec?`<span class="badge ${{PERM_REJECT:"red",REJECTED:"amber",REDO:"blue",REMOVED:"red"}[ctrlDec.Status]||"grey"}">${{PERM_REJECT:"Permanently rejected",REJECTED:"Rejected",REDO:"Redo",REMOVED:"Removed",SELECTED:"Selected"}[ctrlDec.Status]||ctrlDec.Status}</span>${!ctrlDec.ModuleID?'<span class="muted" style="font-size:11px;margin-left:6px">PSG</span>':""}`
-              :`<span class="badge grey">Not decided</span>`}</td>
+          <td>${selectedLevels.length?`<span class="badge green">Selected for ${selectedLevels.length===2?"All":selectedLevels[0]}</span> `:""}${backupLevels.length?`<span class="badge teal">Backup for ${backupLevels.length===2?"All":backupLevels[0]}</span>`:""}${(!selectedLevels.length&&!backupLevels.length)?(ctrlDec?`<span class="badge ${{PERM_REJECT:"red",REJECTED:"amber",REDO:"blue",REMOVED:"red"}[ctrlDec.Status]||"grey"}">${{PERM_REJECT:"Permanently rejected",REJECTED:"Rejected",REDO:"Redo",REMOVED:"Removed",SELECTED:"Selected"}[ctrlDec.Status]||ctrlDec.Status}</span>${!ctrlDec.ModuleID?'<span class="muted" style="font-size:11px;margin-left:6px">PSG</span>':""}`:`<span class="badge grey">Not decided</span>`):""}</td>
         </tr>`).join("")}
       </table></div>
     </div>
@@ -1526,6 +1570,227 @@ window.submitEditEvaluator = async function(eid) {
   if(!name){ $("ee-err").textContent="Name is required."; $("ee-err").classList.remove("hidden"); return; }
   try { showLoading(true); await apiCall({action:"updateEvaluator", EvaluatorID:eid, Name:name, Active:$("ee-active").value==="true"}); await loadAll(); closeModal(); showToast("Updated."); nav("evaluators"); }
   catch(e){ $("ee-err").textContent=e.message; $("ee-err").classList.remove("hidden"); }
+  showLoading(false);
+};
+
+window.showEditEvaluation = function(evalId) {
+  const ev = DB.evaluations.find(x => String(x.EvalID) === String(evalId));
+  if (!ev) return;
+  const scores = DB.evaluationscores.filter(s => String(s.EvalID) === String(evalId));
+  const evOptions = DB.evaluators
+    .filter(e => isTrue(e.Active) || String(e.EvaluatorID) === String(ev.EvaluatorID))
+    .map(e => `<option value="${e.EvaluatorID}" ${String(e.EvaluatorID)===String(ev.EvaluatorID)?"selected":""}>${esc(e.Name)}</option>`).join("");
+  openModal(`<h2>Edit Evaluation</h2>
+    <div class="form-grid single">
+      <div class="field"><label class="lbl">Evaluator</label><select id="ee2-evaluator">${evOptions}</select></div>
+      <div class="field"><div class="tbl-wrap"><table class="score-table" id="ee2-table">
+        <tr><th>Criterion</th><th>Score</th><th>Max</th></tr>
+        ${scores.map(s => `<tr class="ee2-row" data-field-id="${s.FieldID}">
+          <td>${esc(s.Criterion)}</td>
+          <td><input type="number" min="${s.MinAtTime}" max="${s.MaxAtTime}" step="1" value="${s.Score}"></td>
+          <td class="max-lbl">/ ${s.MaxAtTime}</td>
+        </tr>`).join("")}
+      </table></div></div>
+      <div class="field"><label class="lbl">Remarks</label><textarea id="ee2-remarks">${esc(ev.Remarks||"")}</textarea></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="submitEditEvaluation('${evalId}','${ev.DemoID}')">Save</button>
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+    </div>
+    <div class="error-msg hidden" id="ee2-err"></div>`);
+};
+
+window.submitEditEvaluation = async function(evalId, demoId) {
+  const errEl = $("ee2-err");
+  const scores = [];
+  document.querySelectorAll("#ee2-table .ee2-row").forEach(tr => {
+    scores.push({FieldID: tr.dataset.fieldId, Score: Number(tr.querySelector("input").value) || 0});
+  });
+  try {
+    showLoading(true);
+    await apiCall({action:"updateEvaluation", EvalID:evalId, EvaluatorID:$("ee2-evaluator").value, Remarks:$("ee2-remarks").value.trim(), Scores:scores});
+    await loadAll();
+    closeModal();
+    showToast("Evaluation updated.");
+    nav("demo-detail",{id:demoId});
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove("hidden"); }
+  showLoading(false);
+};
+
+window.showEditDecision = function(did) {
+  const d = DB.demos.find(x => String(x.DemoID) === String(did));
+  if (!d) return;
+  const outcomes = [["SELECTED","Selected"],["BACKUP","Backup"],["REJECTED","Rejected (may present again)"],["REDO","Redo"],["PERM_REJECT","Permanent reject"]];
+  const names = activeEvaluators().map(e => e.Name);
+  if (d.DecidedBy && !names.includes(d.DecidedBy)) names.push(d.DecidedBy);
+  const showLevel = d.Outcome==="SELECTED" || d.Outcome==="BACKUP";
+  openModal(`<h2>Edit Final Decision</h2>
+    <div class="form-grid">
+      <div class="field">
+        <label class="lbl">Outcome *</label>
+        <select id="ed2-outcome" onchange="toggleEditDecideFields()">
+          ${outcomes.map(o => `<option value="${o[0]}" ${d.Outcome===o[0]?"selected":""}>${o[1]}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field ${showLevel?"":"hidden"}" id="ed2-level-row">
+        <label class="lbl">Applies to *</label>
+        <select id="ed2-level">
+          <option value="ALL" ${(d.Level==="ALL"||!d.Level)?"selected":""}>All (UG &amp; PG)</option>
+          <option value="UG" ${d.Level==="UG"?"selected":""}>UG</option>
+          <option value="PG" ${d.Level==="PG"?"selected":""}>PG</option>
+        </select>
+      </div>
+      <div class="field ${d.Outcome==="PERM_REJECT"?"":"hidden"}" id="ed2-scope-row">
+        <label class="lbl">Rejected for *</label>
+        <select id="ed2-scope">
+          <option value="MODULE" ${d.RejectScope!=="PSG"?"selected":""}>This module only</option>
+          <option value="PSG" ${d.RejectScope==="PSG"?"selected":""}>PSG (all modules, permanent)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="lbl">Decided by</label>
+        <select id="ed2-by"><option value="">-- select --</option>
+          ${names.map(n => `<option value="${esc(n)}" ${d.DecidedBy===n?"selected":""}>${esc(n)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field full"><label class="lbl">Final Remarks</label><textarea id="ed2-remarks">${esc(d.FinalRemarks||"")}</textarea></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn" onclick="submitEditDecision('${did}')">Save</button>
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+    </div>
+    <div class="error-msg hidden" id="ed2-err"></div>`);
+};
+
+window.toggleEditDecideFields = function() {
+  const o = $("ed2-outcome").value;
+  $("ed2-level-row").classList.toggle("hidden", o!=="SELECTED" && o!=="BACKUP");
+  $("ed2-scope-row").classList.toggle("hidden", o!=="PERM_REJECT");
+};
+
+window.submitEditDecision = async function(did) {
+  const errEl = $("ed2-err");
+  const outcome = $("ed2-outcome").value;
+  const remarks = $("ed2-remarks").value.trim();
+  if (outcome==="PERM_REJECT" && !remarks) {
+    errEl.textContent = "Please write the reason for a permanent rejection.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  const level = (outcome==="SELECTED"||outcome==="BACKUP") ? $("ed2-level").value : "ALL";
+  const scope = outcome==="PERM_REJECT" ? $("ed2-scope").value : "";
+  try {
+    showLoading(true);
+    await apiCall({action:"updateDecision", DemoID:did, Outcome:outcome, Level:level, RejectScope:scope, DecidedBy:$("ed2-by").value, FinalRemarks:remarks});
+    await loadAll();
+    closeModal();
+    showToast("Decision updated.");
+    nav("demo-detail",{id:did});
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove("hidden"); }
+  showLoading(false);
+};
+
+// ── Action Taken ───────────────────────────────────────────────
+window.actionLabel = s => ({SELECTED:"Selected",BACKUP:"Backup",REJECTED:"Rejected",REDO:"Redo",PERM_REJECT:"Permanent reject",REMOVED:"Removed",FRESH_START:"Fresh start"}[s]||s||"-");
+
+function actionTakenPage(m, params={}) {
+  const tf  = String(params.trainer || "");
+  const pre = String(params.trainerID || "");
+  const colors = {SELECTED:"green",BACKUP:"teal",REJECTED:"amber",REDO:"blue",PERM_REJECT:"red",REMOVED:"red",FRESH_START:"purple"};
+  const hist = DB.decisions
+    .filter(d => !tf || String(d.TrainerID)===tf)
+    .sort((a,b) => new Date(b.EffectiveDate)-new Date(a.EffectiveDate) || Number(b.DecisionID)-Number(a.DecisionID));
+
+  m.innerHTML = `
+    <div class="page-head"><div><h1>Action Taken</h1><div class="sub">Promote, extend, demote or remove a trainer for a module, without a demo.</div></div></div>
+    <div class="card">
+      <div class="card-head"><h2>New Action</h2></div>
+      <div class="form-grid">
+        <div class="field"><label class="lbl">Trainer *</label>
+          <select id="ac-trainer"><option value="">-- select --</option>
+            ${activeTrainers().map(t => `<option value="${t.TrainerID}" ${String(t.TrainerID)===pre?"selected":""}>${esc(t.Name)}</option>`).join("")}
+          </select></div>
+        <div class="field"><label class="lbl">Module *</label>
+          <select id="ac-module"><option value="">-- select --</option>
+            ${activeModules().map(mod => `<option value="${mod.ModuleID}">${esc(mod.Name)}</option>`).join("")}
+          </select></div>
+        <div class="field"><label class="lbl">Level *</label>
+          <select id="ac-level"><option value="ALL">All (UG &amp; PG)</option><option value="UG">UG</option><option value="PG">PG</option></select></div>
+        <div class="field"><label class="lbl">Action *</label>
+          <select id="ac-status">
+            <option value="SELECTED">Select (make trainer)</option>
+            <option value="BACKUP">Backup</option>
+            <option value="REMOVED">Remove</option>
+          </select></div>
+        <div class="field"><label class="lbl">Taken by</label>
+          <select id="ac-by"><option value="">-- select --</option>
+            ${activeEvaluators().map(e => `<option value="${esc(e.Name)}">${esc(e.Name)}</option>`).join("")}
+          </select></div>
+        <div class="field full"><label class="lbl">Reason</label><textarea id="ac-reason"></textarea></div>
+      </div>
+      <div class="form-actions"><button class="btn" onclick="submitAction()">Save Action</button></div>
+      <div class="error-msg hidden" id="ac-err"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>History (${hist.length})</h2></div>
+      <div class="filters">
+        <label>Trainer<select id="ac-f-trainer"><option value="">All</option>
+          ${DB.trainers.map(t => `<option value="${t.TrainerID}" ${tf===String(t.TrainerID)?"selected":""}>${esc(t.Name)}</option>`).join("")}
+        </select></label>
+        <button class="btn" onclick="nav('action-taken',{trainer:$('ac-f-trainer').value})">Filter</button>
+        <a class="btn ghost" href="#" onclick="nav('action-taken');return false;">Clear</a>
+      </div>
+      <div class="tbl-wrap"><table>
+        <tr><th>Date</th><th>Trainer</th><th>Module</th><th>Level</th><th>Result</th><th>Source</th><th>By</th><th>Reason</th></tr>
+        ${hist.map(d => `<tr>
+          <td>${fmt(d.EffectiveDate)}</td>
+          <td>${esc(trainerName(d.TrainerID))}</td>
+          <td>${d.ModuleID ? esc(moduleName(d.ModuleID)) : "All modules"}</td>
+          <td>${(!d.Level||d.Level==="ALL") ? "All" : esc(d.Level)}</td>
+          <td><span class="badge ${colors[d.Status]||"grey"}">${esc(actionLabel(d.Status))}</span></td>
+          <td>${esc(d.ActionType || (d.DemoID ? "Demo" : "Action"))}</td>
+          <td>${esc(d.TakenBy||"")}</td>
+          <td style="max-width:240px">${esc(d.Reason)}</td>
+        </tr>`).join("") || `<tr><td colspan="8" class="empty">No records yet.</td></tr>`}
+      </table></div>
+    </div>
+  `;
+}
+
+window.submitAction = async function() {
+  const errEl = $("ac-err");
+  const fail = msg => { errEl.textContent = msg; errEl.classList.remove("hidden"); };
+  const tid = $("ac-trainer").value, mid = $("ac-module").value;
+  const level = $("ac-level").value, status = $("ac-status").value;
+  const reason = $("ac-reason").value.trim(), by = $("ac-by").value;
+  if (!tid || !mid) { fail("Trainer and Module are required."); return; }
+
+  let fresh = false;
+  if (status === "SELECTED" || status === "BACKUP") {
+    const mods = activeModules();
+    const dec = trainerDecisions(tid);
+    if (trainerStatus(dec, mods) === "PERM_REJECT_ALL") {
+      if (!reason) { fail("This trainer is permanently rejected. A reason is required to continue."); return; }
+      if (!confirm("This trainer was permanently rejected.\n\nContinuing will ignore ALL their earlier selections and start fresh with only this module.\n\nContinue?")) return;
+      fresh = true;
+    } else {
+      const cell = levelCells(dec, mods)[String(mid)] || {};
+      const lvls = level === "ALL" ? ["UG","PG"] : [level];
+      if (lvls.some(l => cell[l] && cell[l].Status === "PERM_REJECT")) {
+        if (!reason) { fail("This module was permanently rejected for this trainer. A reason is required to override it."); return; }
+        if (!confirm("This module was permanently rejected for this trainer.\n\nContinuing will override that rejection for the chosen level.\n\nContinue?")) return;
+      }
+    }
+  }
+
+  try {
+    showLoading(true);
+    await apiCall({action:"recordAction", TrainerID:tid, ModuleID:mid, Level:level, Status:status, Reason:reason, TakenBy:by, FreshStart:fresh});
+    await loadAll();
+    showToast(fresh ? "Fresh start recorded." : "Action saved.");
+    nav("trainer-detail", {id:tid});
+  } catch(e) { fail(e.message); }
   showLoading(false);
 };
 
